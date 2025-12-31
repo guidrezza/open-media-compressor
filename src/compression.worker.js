@@ -140,8 +140,8 @@ async function compress(file, targetSizeBytes, config) {
     }
 
     // 4. Calculate Bitrate
-    // Target Size (bits) * 0.96 (4% overhead safety for container + fluctuation) / Duration (sec)
-    const safetyFactor = 0.96;
+    // Target Size (bits) * 0.98 (2% overhead safety for container + fluctuation) / Duration (sec)
+    const safetyFactor = 0.98;
     let targetBitrate = Math.floor((targetSizeBytes * 8 * safetyFactor) / durationSec);
 
     // Clamp min bitrate but warn

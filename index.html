@@ -412,26 +412,13 @@
                             const blob = await this.compressImage(fileObj.raw, targetBytes);
                             this.downloadFile(blob, this.getOutName(fileObj.raw.name, '.webp'));
                             fileObj.status = 'done';
+                        } else if (fileObj.raw.type.includes('gif')) {
+                            // GIF -> WebM via new Worker
+                            const blob = await this.compressGifWorker(fileObj, targetBytes);
+                            this.downloadFile(blob, this.getOutName(fileObj.raw.name, '.webm'));
+                            fileObj.status = 'done';
                         } else {
-                            // GIF or other?
-                            // If GIF, we treat as video for compression? 
-                            // Old logic: GIF -> WebP (image logic) or MP4 (ffmpeg)?
-                            // Old logic: type.includes('gif') -> convert to MP4 or WebP?
-                            // Line 479 old: Video OR GIF -> Video logic.
-                            // So GIF was converted to MP4 (or WebP if extension replaced properly).
-                            // Let's try sending GIF to worker. MP4Box might not like it though.
-                            // WebCodecs VideoDecoder supports "gif"? No, usually need to parse GIF first.
-                            // Falling back to Image logic for GIF for now if it works, or Error.
-                            // Actually, old 'compressVideo' handled GIF via FFmpeg.
-                            // WebCodecs worker uses MP4Box demuxer => Only works for MP4/MOV inputs!
-                            // CRITICAL: MP4Box only parses ISO BMFF. It cannot parse GIF.
-                            // So we CANNOT use this worker for GIF->MP4 yet unless we have a GIF parser.
-                            // We might need to keep FFmpeg for GIFs or drop GIF support/use Canvas.
-                            // Canvas `drawImage` supports GIF first frame only in standard API.
-
-                            // Decision: Mark GIF as error or implement fall back?
-                            // For now: Error for GIF if not simple image.
-                            throw new Error("Format not supported by WebCodecs/Worker yet");
+                            throw new Error("Format not supported (Only Video, Image, and GIF)");
                         }
                     } catch (e) {
                         console.error(e);
@@ -453,6 +440,38 @@
                         console.error('Worker failed to load:', err);
                         worker.terminate();
                         reject(new Error('Worker failed to start. Check console for details.'));
+                    };
+
+                    worker.onmessage = (e) => {
+                        const { type, value, blob, message } = e.data;
+                        if (type === 'progress') {
+                            fileObj.progress = value;
+                        } else if (type === 'done') {
+                            worker.terminate();
+                            resolve(blob);
+                        } else if (type === 'error') {
+                            worker.terminate();
+                            reject(new Error(message));
+                        } else if (type === 'status') {
+                            fileObj.statusMessage = message;
+                        }
+                    };
+
+                    worker.postMessage({
+                        file: fileObj.raw,
+                        targetSizeBytes: targetBytes
+                    });
+                });
+            },
+
+            compressGifWorker(fileObj, targetBytes) {
+                return new Promise((resolve, reject) => {
+                    const worker = new Worker(new URL('./src/gif.worker.js', import.meta.url), { type: 'module' });
+
+                    worker.onerror = (err) => {
+                        console.error('GIF Worker failed to load:', err);
+                        worker.terminate();
+                        reject(new Error('GIF Worker failed to start. Run "npm install webm-muxer"?'));
                     };
 
                     worker.onmessage = (e) => {
