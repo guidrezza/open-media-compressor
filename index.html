@@ -18,6 +18,7 @@
     <title>Open Media Compressor | Private Browser-Based Compression</title>
 
 
+
     <style>
         :root {
             --bg-color: #121212;
@@ -100,7 +101,6 @@
         }
 
         #file-list-container {
-            display: none;
             width: 100%;
         }
 
@@ -125,6 +125,28 @@
         .file-size {
             color: #888;
             flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .progress-bar {
+            width: 50px;
+            height: 4px;
+            background: #333;
+            border-radius: 2px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: #fff;
+            transition: width 0.2s;
+        }
+
+        .status-text {
+            font-size: 0.75rem;
+            color: #aaa;
         }
 
         .upload-more-item {
@@ -245,24 +267,48 @@
     </style>
 </head>
 
-<body>
+<body x-data="compressor()" @dragover.prevent="isDragging = true" @dragleave.prevent="isDragging = false"
+    @drop.prevent="handleDrop($event)">
 
     <header>
         <h1>Open Media Compressor</h1>
     </header>
 
     <main id="main-content">
-        <div id="drop-zone">
+        <div id="drop-zone" :class="{ 'dragover': isDragging, 'hidden': files.length > 0 }"
+            @click="$refs.fileInput.click()">
             <svg id="upload-icon" viewBox="0 0 24 24">
                 <path
                     d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z" />
             </svg>
             <div id="upload-text">DROP IN FILES OR UPLOAD</div>
-            <input type="file" id="file-input" multiple class="hidden">
+            <input type="file" x-ref="fileInput" multiple class="hidden" @change="handleFiles($event)">
         </div>
 
-        <div id="file-list-container">
-            <div id="file-list"></div>
+        <div id="file-list-container" x-show="files.length > 0" style="display: none;">
+            <div id="file-list">
+                <template x-for="(file, index) in files" :key="index">
+                    <div class="file-item" :class="file.status">
+                        <div class="file-info">
+                            <span class="file-name" x-text="truncate(file.raw.name, 25)"></span>
+                            <span class="file-size" x-text="formatSize(file.raw.size)"></span>
+                        </div>
+                        <div class="file-status-row">
+                            <span class="file-status-label" x-show="file.status"
+                                x-text="file.status?.toUpperCase()"></span>
+                            <span class="file-status-msg" x-show="file.statusMessage"
+                                x-text="file.statusMessage"></span>
+                            <span class="file-progress" x-show="file.status === 'processing'"
+                                x-text="file.progress + '%'"></span>
+                        </div>
+                    </div>
+                </template>
+
+                <div class="file-item upload-more-item" @click="$refs.fileInput.click()">
+                    <span class="file-name">Upload more 🔼</span>
+                    <span class="file-size"></span>
+                </div>
+            </div>
         </div>
     </main>
 
@@ -270,15 +316,18 @@
         <div class="control-row">
             <div class="size-control">
                 <label>Max Size:</label>
-                <input type="number" id="max-size" value="10">
+                <input type="number" x-model="maxSize">
                 <div class="toggle-group">
-                    <button class="toggle-btn" data-unit="KB">KB</button>
-                    <button class="toggle-btn active" data-unit="MB">MB</button>
+                    <button class="toggle-btn" :class="{ 'active': unit === 'KB' }" @click="unit = 'KB'">KB</button>
+                    <button class="toggle-btn" :class="{ 'active': unit === 'MB' }" @click="unit = 'MB'">MB</button>
                 </div>
             </div>
         </div>
         <div class="control-row">
-            <button id="compress-btn">COMPRESS</button>
+            <button id="compress-btn" @click="startCompression" :disabled="isCompressing || files.length === 0"
+                x-text="isCompressing ? 'WORKING...' : 'COMPRESS'">
+                COMPRESS
+            </button>
         </div>
     </div>
 
@@ -291,339 +340,198 @@
         </div>
     </footer>
 
-    <!-- 
-        NOTE ON DEPLOYMENT:
-        FFmpeg.wasm requires SharedArrayBuffer, which requires Cross-Origin Isolation.
-        Your server MUST send these headers:
-        Cross-Origin-Embedder-Policy: require-corp
-        Cross-Origin-Opener-Policy: same-origin
-    -->
-
-    <!-- FFmpeg.wasm 0.12 Scripts (using local packages for Worker compatibility) -->
     <script type="module">
-        import { FFmpeg } from '@ffmpeg/ffmpeg';
-        import { fetchFile, toBlobURL } from '@ffmpeg/util';
+        import Alpine from 'alpinejs';
 
-        const ffmpeg = new FFmpeg();
-        let ffmpegLoaded = false;
+        window.Alpine = Alpine;
 
-        const dropZone = document.getElementById('drop-zone');
-        const fileInput = document.getElementById('file-input');
-        const fileListContainer = document.getElementById('file-list-container');
-        const fileList = document.getElementById('file-list');
-        const compressBtn = document.getElementById('compress-btn');
-        const maxSizeInput = document.getElementById('max-size');
-        const toggleBtns = document.querySelectorAll('.toggle-btn');
+        Alpine.data('compressor', () => ({
+            files: [],
+            isDragging: false,
+            isCompressing: false,
+            maxSize: 10,
+            unit: 'MB',
 
-        let selectedFiles = [];
-        let currentUnit = 'MB';
+            handleDrop(e) {
+                this.isDragging = false;
+                this.addFiles(e.dataTransfer.files);
+            },
 
-        // --- UI Events ---
+            handleFiles(e) {
+                this.addFiles(e.target.files);
+            },
 
-        dropZone.onclick = () => fileInput.click();
-
-        // Global drag and drop
-        window.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            dropZone.classList.add('dragover');
-        });
-
-        window.addEventListener('dragleave', (e) => {
-            if (e.relatedTarget === null) {
-                dropZone.classList.remove('dragover');
-            }
-        });
-
-        window.addEventListener('drop', (e) => {
-            e.preventDefault();
-            dropZone.classList.remove('dragover');
-            handleFiles(e.dataTransfer.files);
-        });
-
-        fileInput.onchange = (e) => handleFiles(e.target.files);
-
-        toggleBtns.forEach(btn => {
-            btn.onclick = () => {
-                toggleBtns.forEach(b => b.classList.remove('active'));
-                btn.classList.add('active');
-                currentUnit = btn.dataset.unit;
-            };
-        });
-
-        function handleFiles(files) {
-            if (files.length === 0) return;
-
-            selectedFiles = [...selectedFiles, ...Array.from(files)];
-
-            // UI Update
-            dropZone.classList.add('hidden');
-            fileListContainer.style.display = 'block';
-            renderFileList();
-        }
-
-        function truncate(str, n) {
-            return (str.length > n) ? str.slice(0, n - 1) + '&hellip;' : str;
-        }
-
-        function renderFileList() {
-            fileList.innerHTML = '';
-            selectedFiles.forEach((file, index) => {
-                const div = document.createElement('div');
-                div.className = 'file-item';
-                const truncatedName = file.name.length > 30 ? file.name.substring(0, 27) + '...' : file.name;
-                div.innerHTML = `
-                    <span class="file-name">${truncatedName}</span>
-                    <span class="file-size">${(file.size / 1024 / 1024).toFixed(2)} MB</span>
-                `;
-                fileList.appendChild(div);
-            });
-
-            // "Upload more" line item
-            if (selectedFiles.length > 0) {
-                const moreDiv = document.createElement('div');
-                moreDiv.className = 'file-item upload-more-item';
-                moreDiv.innerHTML = `
-                    <span class="file-name">Upload more 🔼</span>
-                    <span class="file-size"></span>
-                `;
-                moreDiv.onclick = (e) => {
-                    e.stopPropagation();
-                    fileInput.click();
-                };
-                fileList.appendChild(moreDiv);
-            }
-        }
-
-        function downloadFile(blob, filename) {
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = filename;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            setTimeout(() => URL.revokeObjectURL(url), 100);
-        }
-
-        function getVideoDuration(file) {
-            return new Promise((resolve) => {
-                const video = document.createElement('video');
-                video.preload = 'metadata';
-                const url = URL.createObjectURL(file);
-                video.onloadedmetadata = () => {
-                    resolve(video.duration || 0);
-                    URL.revokeObjectURL(url);
-                };
-                video.onerror = () => {
-                    console.error("Could not load video metadata.");
-                    resolve(0);
-                    URL.revokeObjectURL(url);
-                };
-                video.src = url;
-            });
-        }
-
-        // --- Logic ---
-
-        async function initFFmpeg() {
-            if (!ffmpegLoaded) {
-                try {
-                    ffmpeg.on('log', ({ message }) => {
-                        console.log(message);
+            addFiles(fileList) {
+                for (let i = 0; i < fileList.length; i++) {
+                    this.files.push({
+                        raw: fileList[i],
+                        status: null, // null, 'processing', 'done', 'error'
+                        progress: 0
                     });
-
-                    const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm';
-                    await ffmpeg.load({
-                        coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-                        wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
-                        // 0.12.6 might need 'workerURL' if we were strictly separating, but coreURL usually handles the main entry.
-                        // However, toBlobURL is the key fix for "Failed to construct Worker".
-                    });
-                    ffmpegLoaded = true;
-                } catch (e) {
-                    console.error("FFmpeg Load Error:", e);
-                    if (!window.crossOriginIsolated) {
-                        throw new Error("COOP/COEP headers are missing. SharedArrayBuffer is not available.");
-                    }
-                    throw e;
                 }
-            }
-        }
+            },
 
-        compressBtn.onclick = async () => {
-            if (selectedFiles.length === 0) return;
+            truncate(str, n) {
+                return (str.length > n) ? str.slice(0, n - 1) + '...' : str;
+            },
 
-            const targetSize = parseFloat(maxSizeInput.value);
-            const targetSizeInBytes = currentUnit === 'MB' ? targetSize * 1024 * 1024 : targetSize * 1024;
+            formatSize(bytes) {
+                return (bytes / 1024 / 1024).toFixed(2) + ' MB';
+            },
 
-            compressBtn.disabled = true;
-            compressBtn.textContent = 'WORKING...';
+            async startCompression() {
+                this.isCompressing = true;
 
-            try {
-                await initFFmpeg();
-                for (const file of selectedFiles) {
-                    if (file.size <= targetSizeInBytes) {
-                        console.log(`Skipping ${file.name}, already below target size.`);
-                        // Even if skipping re-encoding, requirement said "append _c" and trigger download
-                        const outName = file.name.replace(/(\.[\w\d]+)$/, '_c$1');
-                        downloadFile(file, outName);
+                const targetBytes = this.unit === 'MB'
+                    ? this.maxSize * 1024 * 1024
+                    : this.maxSize * 1024;
+
+                for (let fileObj of this.files) {
+                    if (fileObj.status === 'done') continue; // Skip already done
+
+                    // Skip if already small enough
+                    if (fileObj.raw.size <= targetBytes) {
+                        console.log(`Skipping ${fileObj.raw.name}, already small enough.`);
+                        fileObj.status = 'done';
+                        // Still download it as requested by "passthrough" logic? 
+                        // Previous logic renamed it to _c and downloaded.
+                        this.downloadFile(fileObj.raw, this.getOutName(fileObj.raw.name));
                         continue;
                     }
 
-                    let compressedBlob;
-                    let outName = file.name.replace(/(\.[\w\d]+)$/, '_c$1');
+                    fileObj.status = 'processing';
+                    fileObj.progress = 0;
 
-                    if (file.type.startsWith('image/') && !file.type.includes('gif')) {
-                        compressedBlob = await compressImage(file, targetSizeInBytes);
-                        outName = outName.replace(/\.[\w\d]+$/, '.webp');
-                    } else if (file.type.startsWith('video/') || file.type.includes('gif')) {
-                        compressedBlob = await compressVideo(file, targetSizeInBytes);
-                        outName = outName.replace(/\.[\w\d]+$/, file.type.includes('gif') ? '.webp' : '.mp4');
-                    }
+                    try {
+                        if (fileObj.raw.type.startsWith('video')) {
+                            const blob = await this.compressVideoWorker(fileObj, targetBytes);
+                            this.downloadFile(blob, this.getOutName(fileObj.raw.name, '.mp4'));
+                            fileObj.status = 'done';
+                        } else if (fileObj.raw.type.startsWith('image') && !fileObj.raw.type.includes('gif')) {
+                            // Fallback to main thread Image compression for now
+                            const blob = await this.compressImage(fileObj.raw, targetBytes);
+                            this.downloadFile(blob, this.getOutName(fileObj.raw.name, '.webp'));
+                            fileObj.status = 'done';
+                        } else {
+                            // GIF or other?
+                            // If GIF, we treat as video for compression? 
+                            // Old logic: GIF -> WebP (image logic) or MP4 (ffmpeg)?
+                            // Old logic: type.includes('gif') -> convert to MP4 or WebP?
+                            // Line 479 old: Video OR GIF -> Video logic.
+                            // So GIF was converted to MP4 (or WebP if extension replaced properly).
+                            // Let's try sending GIF to worker. MP4Box might not like it though.
+                            // WebCodecs VideoDecoder supports "gif"? No, usually need to parse GIF first.
+                            // Falling back to Image logic for GIF for now if it works, or Error.
+                            // Actually, old 'compressVideo' handled GIF via FFmpeg.
+                            // WebCodecs worker uses MP4Box demuxer => Only works for MP4/MOV inputs!
+                            // CRITICAL: MP4Box only parses ISO BMFF. It cannot parse GIF.
+                            // So we CANNOT use this worker for GIF->MP4 yet unless we have a GIF parser.
+                            // We might need to keep FFmpeg for GIFs or drop GIF support/use Canvas.
+                            // Canvas `drawImage` supports GIF first frame only in standard API.
 
-                    if (compressedBlob) {
-                        downloadFile(compressedBlob, outName);
-                    }
-                }
-            } catch (err) {
-                console.error("Compression Process Error:", err);
-                let msg = 'An error occurred during compression.';
-                if (err.message.includes('COOP/COEP')) {
-                    msg += '\n\nSecurity headers (COOP/COEP) are missing. Please ensure your hosting provider is configured correctly.';
-                } else {
-                    msg += '\n\nDetails: ' + err.message;
-                }
-                alert(msg);
-            } finally {
-                compressBtn.disabled = false;
-                compressBtn.textContent = 'COMPRESS';
-            }
-        };
-
-        async function compressImage(file, targetBytes) {
-            const img = new Image();
-            img.src = URL.createObjectURL(file);
-            await new Promise(r => img.onload = r);
-
-            const canvas = document.createElement('canvas');
-            const ctx = canvas.getContext('2d');
-
-            let width = img.width;
-            let height = img.height;
-
-            const getBlob = (q, w, h) => {
-                canvas.width = w;
-                canvas.height = h;
-                ctx.drawImage(img, 0, 0, w, h);
-                return new Promise(r => canvas.toBlob(r, 'image/webp', q));
-            };
-
-            // Estimate initial quality based on size ratio
-            const sizeRatio = targetBytes / file.size;
-            let quality = Math.min(0.95, Math.max(0.1, sizeRatio * 1.2));
-
-            let blob = await getBlob(quality, width, height);
-
-            // Binary search for optimal quality (faster than linear)
-            if (blob.size > targetBytes) {
-                let low = 0.05, high = quality;
-                for (let i = 0; i < 6 && blob.size > targetBytes; i++) {
-                    quality = (low + high) / 2;
-                    blob = await getBlob(quality, width, height);
-                    if (blob.size > targetBytes) {
-                        high = quality;
-                    } else {
-                        low = quality;
+                            // Decision: Mark GIF as error or implement fall back?
+                            // For now: Error for GIF if not simple image.
+                            throw new Error("Format not supported by WebCodecs/Worker yet");
+                        }
+                    } catch (e) {
+                        console.error(e);
+                        fileObj.status = 'error';
+                        fileObj.statusMessage = e.message;
                     }
                 }
+
+                this.isCompressing = false;
+            },
+
+            compressVideoWorker(fileObj, targetBytes) {
+                return new Promise((resolve, reject) => {
+                    const worker = new Worker(new URL('./src/compression.worker.js', import.meta.url), { type: 'module' });
+
+                    worker.onmessage = (e) => {
+                        const { type, value, blob, message } = e.data;
+                        if (type === 'progress') {
+                            fileObj.progress = value;
+                        } else if (type === 'done') {
+                            worker.terminate();
+                            resolve(blob);
+                        } else if (type === 'error') {
+                            worker.terminate();
+                            reject(new Error(message));
+                        } else if (type === 'status') {
+                            fileObj.statusMessage = message;
+                        }
+                    };
+
+                    worker.postMessage({
+                        file: fileObj.raw,
+                        targetSizeBytes: targetBytes
+                    });
+                });
+            },
+
+            async compressImage(file, targetBytes) {
+                // Ported from legacy code
+                const img = new Image();
+                img.src = URL.createObjectURL(file);
+                await new Promise(r => img.onload = r);
+
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+
+                let width = img.width;
+                let height = img.height;
+
+                const getBlob = (q, w, h) => {
+                    canvas.width = w;
+                    canvas.height = h;
+                    ctx.drawImage(img, 0, 0, w, h);
+                    return new Promise(r => canvas.toBlob(r, 'image/webp', q));
+                };
+
+                const sizeRatio = targetBytes / file.size;
+                let quality = Math.min(0.95, Math.max(0.1, sizeRatio * 1.2));
+                let blob = await getBlob(quality, width, height);
+
+                if (blob.size > targetBytes) {
+                    let low = 0.05, high = quality;
+                    for (let i = 0; i < 6 && blob.size > targetBytes; i++) {
+                        quality = (low + high) / 2;
+                        blob = await getBlob(quality, width, height);
+                        if (blob.size > targetBytes) high = quality;
+                        else low = quality;
+                    }
+                }
+
+                if (blob.size > targetBytes && quality <= 0.1) {
+                    const scaleFactor = Math.sqrt(targetBytes / blob.size) * 0.9;
+                    width = Math.floor(width * scaleFactor);
+                    height = Math.floor(height * scaleFactor);
+                    blob = await getBlob(0.8, width, height);
+                }
+
+                URL.revokeObjectURL(img.src);
+                return blob;
+            },
+
+            downloadFile(blob, filename) {
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                setTimeout(() => URL.revokeObjectURL(url), 100);
+            },
+
+            getOutName(originalName, newExt) {
+                const namePart = originalName.replace(/(\.[\w\d]+)$/, '');
+                const ext = newExt || originalName.match(/(\.[\w\d]+)$/)[0];
+                return `${namePart}_c${ext}`;
             }
+        }));
 
-            // If quality is at minimum and still too large, reduce resolution
-            if (blob.size > targetBytes && quality <= 0.1) {
-                const scaleFactor = Math.sqrt(targetBytes / blob.size) * 0.9;
-                width = Math.floor(width * scaleFactor);
-                height = Math.floor(height * scaleFactor);
-                blob = await getBlob(0.8, width, height); // Bump quality back up for resized
-            }
-
-            URL.revokeObjectURL(img.src);
-            return blob;
-        }
-
-        async function compressVideo(file, targetBytes) {
-            const isGif = file.type.includes('gif');
-            const ext = file.name.split('.').pop();
-            const inputName = `input.${ext}`;
-            const outputName = 'out.mp4'; // Always convert to MP4 for Discord compatibility
-
-            await ffmpeg.writeFile(inputName, await fetchFile(file));
-
-            const duration = await getVideoDuration(file);
-
-            // Safety margin: target 95% of the limit to account for container overhead and bitrate fluctuations
-            const safeTargetBytes = targetBytes * 0.95;
-
-            // Calculate bitrate
-            // Total bits = bytes * 8
-            // Video bits = Total bits - Audio bits
-            // Audio: 128kbps (approx 16KB/s) is standard and decent
-            const audioBitrateKbps = isGif ? 0 : 128;
-            const audioTotalBytes = (audioBitrateKbps / 8) * 1024 * duration;
-            const videoAvailableBytes = safeTargetBytes - audioTotalBytes;
-
-            // If video is very short or limit is huge, ensure we have a sane minimum/maximum
-            let videoBitrateKbps = (videoAvailableBytes * 8) / duration / 1000;
-
-            // Clamp bitrate: Min 50kbps (potato quality), Max 5000kbps (plenty for discord)
-            videoBitrateKbps = Math.max(50, Math.min(videoBitrateKbps, 8000));
-            videoBitrateKbps = Math.floor(videoBitrateKbps);
-
-            console.log(`Plan: Duration=${duration}s, Audio=${audioBitrateKbps}k, Video=${videoBitrateKbps}k`);
-
-            const ffmpegArgs = [
-                '-i', inputName,
-                '-c:v', 'libx264',
-                '-preset', 'veryfast', // 'ultrafast' is faster but worse compression; 'veryfast' is good balance
-                '-b:v', `${videoBitrateKbps}k`,
-                '-maxrate', `${videoBitrateKbps * 1.5}k`, // Allow some peaks
-                '-bufsize', `${videoBitrateKbps * 2}k`,
-                '-pix_fmt', 'yuv420p', // Required for broad player compatibility (especially from GIF sources)
-                // Scale if necessary? For now, we rely on bitrate to control size, but if 4k, we might want to downscale. 
-                // Let's add a sane limit: scale to max 1080p width if larger to save processing power on massive files
-                '-vf', "scale='min(1920,iw)':-2",
-                '-y', // Overwrite output
-            ];
-
-            if (isGif) {
-                // GIFs have no audio
-                ffmpegArgs.push('-an');
-            } else {
-                // Determine if we encode audio
-                ffmpegArgs.push('-c:a', 'aac', '-b:a', `${audioBitrateKbps}k`);
-            }
-
-            ffmpegArgs.push(outputName);
-
-            console.log("Running FFmpeg:", ffmpegArgs);
-
-            await ffmpeg.exec(ffmpegArgs);
-
-            // Check if output file was created
-            let data;
-            try {
-                data = await ffmpeg.readFile(outputName);
-            } catch (e) {
-                console.error("FFmpeg output not found.");
-                throw new Error(`FFmpeg failed to produce ${outputName}. Check debug logs.`);
-            }
-
-            // Cleanup
-            try { await ffmpeg.deleteFile(inputName); } catch (e) { }
-            try { await ffmpeg.deleteFile(outputName); } catch (e) { }
-
-            return new Blob([data.buffer], { type: 'video/mp4' });
-        }
-
+        Alpine.start();
     </script>
 </body>
 

@@ -1,31 +1,38 @@
 # Open Media Compressor
 
-An ultra-minimalist, "Brutalist" single-page web application for media compression. It runs entirely in the browser using Vite for a seamless local development experience with proper security headers.
+An ultra-minimalist, "Brutalist" single-page web application for media compression. It runs entirely in the browser using **WebCodecs** and **Web Workers** for high-performance, non-blocking compression.
 
 ## Features
 
-- **Privacy First**: All processing happens locally using `ffmpeg.wasm` and the Canvas API.
-- **Videos**: Compressed to **AV1 (.mp4)** with exactly targeted bitrates.
-- **Audio**: Automatically capped at **64 kbps** (Opus or AAC) to maximize video quality.
-- **Images**: Iteratively compressed to **WebP** to hit target size.
-- **GIFs**: Converted to **Animated WebP** with looping enabled.
-- **Smart Verification**: Automatically re-runs compression with lower quality if the target size is exceeded.
-- **Brutalist Aesthetic**: Built with a sleek, high-contrast dark mode.
+- **Privacy First**: All processing happens locally on your device. No data is ever sent to a server.
+- **Videos**: Compressed to **H.264 (.mp4)** with exactly targeted bitrates using native browser hardware acceleration via WebCodecs.
+- **Images**: Intelligently compressed to **WebP** to hit target sizes.
+- **High Performance**: Uses a dedicated Web Worker to ensure the UI remains responsive, even during heavy 4K video compression.
+- **Brutalist Aesthetic**: Built with a sleek, high-contrast dark mode using **Alpine.js**.
 
-## Deployment Requirements
+## Technology Stack
 
-### COOP/COEP Headers
-Because this app uses `ffmpeg.wasm`, it relies on `SharedArrayBuffer`. For security reasons, modern browsers require **Cross-Origin Isolation**. Your server **MUST** serve the application with the following HTTP headers:
+- **Core**: Native `WebCodecs` API + `mp4box.js` + `mp4-muxer`.
+- **UI**: `Alpine.js` + Vanilla CSS.
+- **Build**: Vite.
 
-```http
-Cross-Origin-Embedder-Policy: require-corp
-Cross-Origin-Opener-Policy: same-origin
-```
+## Development
 
-### Hosting
-Ensure your hosting provider allows you to set custom headers (e.g., Vercel, Netlify, Cloudflare Pages). If these headers are missing, the app will fail to load the compression engine.
+1. Install dependencies:
+   ```bash
+   npm install
+   ```
 
+2. Start the development server:
+   ```bash
+   npm run dev
+   ```
+
+3. Build for production:
+   ```bash
+   npm run build
+   ```
 
 ## Credits
-Open-source and 100% free. Made by [guidrezza](https://guidrezza.com).
 
+Open-source and 100% free. Made by [guidrezza](https://guidrezza.com).

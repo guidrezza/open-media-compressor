@@ -8,6 +8,11 @@
         "build": "vite build",
         "preview": "vite preview"
     },
+    "dependencies": {
+        "alpinejs": "^3.13.3",
+        "mp4-muxer": "^5.1.0",
+        "mp4box": "^0.5.2"
+    },
     "devDependencies": {
         "vite": "^5.0.0"
     }
