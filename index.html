@@ -267,8 +267,8 @@
     </style>
 </head>
 
-<body x-data="compressor()" @dragover.prevent="isDragging = true" @dragleave.prevent="isDragging = false"
-    @drop.prevent="handleDrop($event)">
+<body x-data="compressor()" @dragover.window.prevent="isDragging = true" @dragleave.window.prevent="isDragging = false"
+    @drop.window.prevent="handleDrop($event)">
 
     <header>
         <h1>Open Media Compressor</h1>
@@ -445,7 +445,15 @@
 
             compressVideoWorker(fileObj, targetBytes) {
                 return new Promise((resolve, reject) => {
+                    // Create the worker
                     const worker = new Worker(new URL('./src/compression.worker.js', import.meta.url), { type: 'module' });
+
+                    // CRITICAL FIX: Listen for worker initialization errors (404, SyntaxError, etc.)
+                    worker.onerror = (err) => {
+                        console.error('Worker failed to load:', err);
+                        worker.terminate();
+                        reject(new Error('Worker failed to start. Check console for details.'));
+                    };
 
                     worker.onmessage = (e) => {
                         const { type, value, blob, message } = e.data;
