@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description"
+        content="Ultra-minimalist, private, browser-based media compressor. Compress images, videos, and GIFs entirely in your browser with no data leaving your device.">
+    <meta name="keywords"
+        content="media compressor, video compressor, image compressor, gif compressor, private compression, ffmpeg.wasm, brutalist ui">
+    <meta name="author" content="guidrezza">
+    <link rel="icon" type="image/png" href="/favicon-96x96.png" sizes="96x96" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="shortcut icon" href="/favicon.ico" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-title" content="Compressor" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <title>Open Media Compressor | Private Browser-Based Compression</title>
+
+
+    <style>
+        :root {
+            --bg-color: #121212;
+            --text-color: #ffffff;
+            --accent-color: #ffffff;
+            --border-color: #333333;
+            --font-main: 'Inter', system-ui, -apple-system, sans-serif;
+            --control-height: 44px;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: var(--font-main);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            padding: 20px;
+            max-width: 500px;
+            margin: 0 auto;
+            gap: 20px;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 10px;
+        }
+
+        header h1 {
+            font-size: 1.5rem;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: -0.05rem;
+            display: inline-block;
+            border-bottom: 2px solid var(--text-color);
+            padding-bottom: 5px;
+        }
+
+        /* Drop Zone & File List Area */
+        #main-content {
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        #drop-zone {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            border: 2px dashed var(--border-color);
+            padding: 40px 20px;
+            cursor: pointer;
+            transition: border-color 0.3s ease, background-color 0.3s ease;
+        }
+
+        #drop-zone.dragover {
+            border-color: var(--accent-color);
+            background-color: rgba(255, 255, 255, 0.05);
+        }
+
+        #upload-icon {
+            width: 40px;
+            height: 40px;
+            fill: currentColor;
+            margin-bottom: 15px;
+        }
+
+        #upload-text {
+            font-size: 1rem;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+
+        #file-list-container {
+            display: none;
+            width: 100%;
+        }
+
+        .file-item {
+            font-size: 0.9rem;
+            margin-bottom: 8px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 8px;
+            font-family: monospace;
+        }
+
+        .file-name {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 65%;
+        }
+
+        .file-size {
+            color: #888;
+            flex-shrink: 0;
+        }
+
+        .upload-more-item {
+            cursor: pointer;
+            color: #ccc;
+            border-bottom-style: dashed;
+            transition: color 0.2s ease;
+        }
+
+        .upload-more-item:hover {
+            color: white;
+        }
+
+        /* Controls */
+        #controls-area {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            margin-top: 10px;
+        }
+
+        .control-row {
+            width: 100%;
+        }
+
+        .size-control {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            width: 100%;
+        }
+
+        .size-control label {
+            font-weight: 700;
+            font-size: 0.85rem;
+            flex-shrink: 0;
+        }
+
+        .size-control input {
+            background: transparent;
+            border: 1px solid var(--border-color);
+            color: white;
+            padding: 0 10px;
+            flex-grow: 1;
+            height: var(--control-height);
+            font-family: inherit;
+            font-size: 0.9rem;
+        }
+
+        .toggle-group {
+            display: flex;
+            border: 1px solid var(--border-color);
+            height: var(--control-height);
+        }
+
+        .toggle-btn {
+            background: transparent;
+            border: none;
+            color: #666;
+            padding: 0 12px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            font-weight: bold;
+            height: 100%;
+        }
+
+        .toggle-btn.active {
+            color: white;
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        #compress-btn {
+            background: white;
+            color: black;
+            border: none;
+            width: 100%;
+            height: 50px;
+            font-size: 1.2rem;
+            font-weight: 900;
+            text-transform: uppercase;
+            cursor: pointer;
+            transition: transform 0.1s ease;
+        }
+
+        #compress-btn:active {
+            transform: scale(0.98);
+        }
+
+        #compress-btn:disabled {
+            background: #444;
+            cursor: not-allowed;
+        }
+
+        /* Footer */
+        footer {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            font-size: 0.75rem;
+            color: #666;
+            margin-top: 15px;
+            text-align: center;
+        }
+
+        .footer-line {
+            line-height: 1.3;
+        }
+
+        .footer-line a {
+            color: white;
+            text-decoration: underline;
+        }
+
+        /* Utilities */
+        .hidden {
+            display: none !important;
+        }
+    </style>
+</head>
+
+<body>
+
+    <header>
+        <h1>Open Media Compressor</h1>
+    </header>
+
+    <main id="main-content">
+        <div id="drop-zone">
+            <svg id="upload-icon" viewBox="0 0 24 24">
+                <path
+                    d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z" />
+            </svg>
+            <div id="upload-text">DROP IN FILES OR UPLOAD</div>
+            <input type="file" id="file-input" multiple class="hidden">
+        </div>
+
+        <div id="file-list-container">
+            <div id="file-list"></div>
+        </div>
+    </main>
+
+    <div id="controls-area">
+        <div class="control-row">
+            <div class="size-control">
+                <label>Max Size:</label>
+                <input type="number" id="max-size" value="10">
+                <div class="toggle-group">
+                    <button class="toggle-btn" data-unit="KB">KB</button>
+                    <button class="toggle-btn active" data-unit="MB">MB</button>
+                </div>
+            </div>
+        </div>
+        <div class="control-row">
+            <button id="compress-btn">COMPRESS</button>
+        </div>
+    </div>
+
+    <footer>
+        <div class="footer-line">
+            Open-source, 100% free, no limits, no data ever leaves your device.
+        </div>
+        <div class="footer-line">
+            Made by <a href="https://guidrezza.com" target="_blank">guidrezza</a>
+        </div>
+    </footer>
+
+    <!-- 
+        NOTE ON DEPLOYMENT:
+        FFmpeg.wasm requires SharedArrayBuffer, which requires Cross-Origin Isolation.
+        Your server MUST send these headers:
+        Cross-Origin-Embedder-Policy: require-corp
+        Cross-Origin-Opener-Policy: same-origin
+    -->
+
+    <!-- FFmpeg.wasm 0.12 Scripts (using local packages for Worker compatibility) -->
+    <script type="module">
+        import { FFmpeg } from '@ffmpeg/ffmpeg';
+        import { fetchFile, toBlobURL } from '@ffmpeg/util';
+
+        const ffmpeg = new FFmpeg();
+        let ffmpegLoaded = false;
+
+        const dropZone = document.getElementById('drop-zone');
+        const fileInput = document.getElementById('file-input');
+        const fileListContainer = document.getElementById('file-list-container');
+        const fileList = document.getElementById('file-list');
+        const compressBtn = document.getElementById('compress-btn');
+        const maxSizeInput = document.getElementById('max-size');
+        const toggleBtns = document.querySelectorAll('.toggle-btn');
+
+        let selectedFiles = [];
+        let currentUnit = 'MB';
+
+        // --- UI Events ---
+
+        dropZone.onclick = () => fileInput.click();
+
+        // Global drag and drop
+        window.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('dragover');
+        });
+
+        window.addEventListener('dragleave', (e) => {
+            if (e.relatedTarget === null) {
+                dropZone.classList.remove('dragover');
+            }
+        });
+
+        window.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            handleFiles(e.dataTransfer.files);
+        });
+
+        fileInput.onchange = (e) => handleFiles(e.target.files);
+
+        toggleBtns.forEach(btn => {
+            btn.onclick = () => {
+                toggleBtns.forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                currentUnit = btn.dataset.unit;
+            };
+        });
+
+        function handleFiles(files) {
+            if (files.length === 0) return;
+
+            selectedFiles = [...selectedFiles, ...Array.from(files)];
+
+            // UI Update
+            dropZone.classList.add('hidden');
+            fileListContainer.style.display = 'block';
+            renderFileList();
+        }
+
+        function truncate(str, n) {
+            return (str.length > n) ? str.slice(0, n - 1) + '&hellip;' : str;
+        }
+
+        function renderFileList() {
+            fileList.innerHTML = '';
+            selectedFiles.forEach((file, index) => {
+                const div = document.createElement('div');
+                div.className = 'file-item';
+                const truncatedName = file.name.length > 30 ? file.name.substring(0, 27) + '...' : file.name;
+                div.innerHTML = `
+                    <span class="file-name">${truncatedName}</span>
+                    <span class="file-size">${(file.size / 1024 / 1024).toFixed(2)} MB</span>
+                `;
+                fileList.appendChild(div);
+            });
+
+            // "Upload more" line item
+            if (selectedFiles.length > 0) {
+                const moreDiv = document.createElement('div');
+                moreDiv.className = 'file-item upload-more-item';
+                moreDiv.innerHTML = `
+                    <span class="file-name">Upload more 🔼</span>
+                    <span class="file-size"></span>
+                `;
+                moreDiv.onclick = (e) => {
+                    e.stopPropagation();
+                    fileInput.click();
+                };
+                fileList.appendChild(moreDiv);
+            }
+        }
+
+        function downloadFile(blob, filename) {
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(url), 100);
+        }
+
+        function getVideoDuration(file) {
+            return new Promise((resolve) => {
+                const video = document.createElement('video');
+                video.preload = 'metadata';
+                const url = URL.createObjectURL(file);
+                video.onloadedmetadata = () => {
+                    resolve(video.duration || 0);
+                    URL.revokeObjectURL(url);
+                };
+                video.onerror = () => {
+                    console.error("Could not load video metadata.");
+                    resolve(0);
+                    URL.revokeObjectURL(url);
+                };
+                video.src = url;
+            });
+        }
+
+        // --- Logic ---
+
+        async function initFFmpeg() {
+            if (!ffmpegLoaded) {
+                try {
+                    ffmpeg.on('log', ({ message }) => {
+                        console.log(message);
+                    });
+
+                    const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm';
+                    await ffmpeg.load({
+                        coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+                        wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+                        // 0.12.6 might need 'workerURL' if we were strictly separating, but coreURL usually handles the main entry.
+                        // However, toBlobURL is the key fix for "Failed to construct Worker".
+                    });
+                    ffmpegLoaded = true;
+                } catch (e) {
+                    console.error("FFmpeg Load Error:", e);
+                    if (!window.crossOriginIsolated) {
+                        throw new Error("COOP/COEP headers are missing. SharedArrayBuffer is not available.");
+                    }
+                    throw e;
+                }
+            }
+        }
+
+        compressBtn.onclick = async () => {
+            if (selectedFiles.length === 0) return;
+
+            const targetSize = parseFloat(maxSizeInput.value);
+            const targetSizeInBytes = currentUnit === 'MB' ? targetSize * 1024 * 1024 : targetSize * 1024;
+
+            compressBtn.disabled = true;
+            compressBtn.textContent = 'WORKING...';
+
+            try {
+                await initFFmpeg();
+                for (const file of selectedFiles) {
+                    if (file.size <= targetSizeInBytes) {
+                        console.log(`Skipping ${file.name}, already below target size.`);
+                        // Even if skipping re-encoding, requirement said "append _c" and trigger download
+                        const outName = file.name.replace(/(\.[\w\d]+)$/, '_c$1');
+                        downloadFile(file, outName);
+                        continue;
+                    }
+
+                    let compressedBlob;
+                    let outName = file.name.replace(/(\.[\w\d]+)$/, '_c$1');
+
+                    if (file.type.startsWith('image/') && !file.type.includes('gif')) {
+                        compressedBlob = await compressImage(file, targetSizeInBytes);
+                        outName = outName.replace(/\.[\w\d]+$/, '.webp');
+                    } else if (file.type.startsWith('video/') || file.type.includes('gif')) {
+                        compressedBlob = await compressVideo(file, targetSizeInBytes);
+                        outName = outName.replace(/\.[\w\d]+$/, file.type.includes('gif') ? '.webp' : '.mp4');
+                    }
+
+                    if (compressedBlob) {
+                        downloadFile(compressedBlob, outName);
+                    }
+                }
+            } catch (err) {
+                console.error("Compression Process Error:", err);
+                let msg = 'An error occurred during compression.';
+                if (err.message.includes('COOP/COEP')) {
+                    msg += '\n\nSecurity headers (COOP/COEP) are missing. Please ensure your hosting provider is configured correctly.';
+                } else {
+                    msg += '\n\nDetails: ' + err.message;
+                }
+                alert(msg);
+            } finally {
+                compressBtn.disabled = false;
+                compressBtn.textContent = 'COMPRESS';
+            }
+        };
+
+        async function compressImage(file, targetBytes) {
+            const img = new Image();
+            img.src = URL.createObjectURL(file);
+            await new Promise(r => img.onload = r);
+
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+
+            let width = img.width;
+            let height = img.height;
+
+            const getBlob = (q, w, h) => {
+                canvas.width = w;
+                canvas.height = h;
+                ctx.drawImage(img, 0, 0, w, h);
+                return new Promise(r => canvas.toBlob(r, 'image/webp', q));
+            };
+
+            // Estimate initial quality based on size ratio
+            const sizeRatio = targetBytes / file.size;
+            let quality = Math.min(0.95, Math.max(0.1, sizeRatio * 1.2));
+
+            let blob = await getBlob(quality, width, height);
+
+            // Binary search for optimal quality (faster than linear)
+            if (blob.size > targetBytes) {
+                let low = 0.05, high = quality;
+                for (let i = 0; i < 6 && blob.size > targetBytes; i++) {
+                    quality = (low + high) / 2;
+                    blob = await getBlob(quality, width, height);
+                    if (blob.size > targetBytes) {
+                        high = quality;
+                    } else {
+                        low = quality;
+                    }
+                }
+            }
+
+            // If quality is at minimum and still too large, reduce resolution
+            if (blob.size > targetBytes && quality <= 0.1) {
+                const scaleFactor = Math.sqrt(targetBytes / blob.size) * 0.9;
+                width = Math.floor(width * scaleFactor);
+                height = Math.floor(height * scaleFactor);
+                blob = await getBlob(0.8, width, height); // Bump quality back up for resized
+            }
+
+            URL.revokeObjectURL(img.src);
+            return blob;
+        }
+
+        async function compressVideo(file, targetBytes) {
+            const isGif = file.type.includes('gif');
+            const ext = file.name.split('.').pop();
+            const inputName = `input.${ext}`;
+            const outputName = 'out.mp4'; // Always convert to MP4 for Discord compatibility
+
+            await ffmpeg.writeFile(inputName, await fetchFile(file));
+
+            const duration = await getVideoDuration(file);
+
+            // Safety margin: target 95% of the limit to account for container overhead and bitrate fluctuations
+            const safeTargetBytes = targetBytes * 0.95;
+
+            // Calculate bitrate
+            // Total bits = bytes * 8
+            // Video bits = Total bits - Audio bits
+            // Audio: 128kbps (approx 16KB/s) is standard and decent
+            const audioBitrateKbps = isGif ? 0 : 128;
+            const audioTotalBytes = (audioBitrateKbps / 8) * 1024 * duration;
+            const videoAvailableBytes = safeTargetBytes - audioTotalBytes;
+
+            // If video is very short or limit is huge, ensure we have a sane minimum/maximum
+            let videoBitrateKbps = (videoAvailableBytes * 8) / duration / 1000;
+
+            // Clamp bitrate: Min 50kbps (potato quality), Max 5000kbps (plenty for discord)
+            videoBitrateKbps = Math.max(50, Math.min(videoBitrateKbps, 8000));
+            videoBitrateKbps = Math.floor(videoBitrateKbps);
+
+            console.log(`Plan: Duration=${duration}s, Audio=${audioBitrateKbps}k, Video=${videoBitrateKbps}k`);
+
+            const ffmpegArgs = [
+                '-i', inputName,
+                '-c:v', 'libx264',
+                '-preset', 'veryfast', // 'ultrafast' is faster but worse compression; 'veryfast' is good balance
+                '-b:v', `${videoBitrateKbps}k`,
+                '-maxrate', `${videoBitrateKbps * 1.5}k`, // Allow some peaks
+                '-bufsize', `${videoBitrateKbps * 2}k`,
+                '-pix_fmt', 'yuv420p', // Required for broad player compatibility (especially from GIF sources)
+                // Scale if necessary? For now, we rely on bitrate to control size, but if 4k, we might want to downscale. 
+                // Let's add a sane limit: scale to max 1080p width if larger to save processing power on massive files
+                '-vf', "scale='min(1920,iw)':-2",
+                '-y', // Overwrite output
+            ];
+
+            if (isGif) {
+                // GIFs have no audio
+                ffmpegArgs.push('-an');
+            } else {
+                // Determine if we encode audio
+                ffmpegArgs.push('-c:a', 'aac', '-b:a', `${audioBitrateKbps}k`);
+            }
+
+            ffmpegArgs.push(outputName);
+
+            console.log("Running FFmpeg:", ffmpegArgs);
+
+            await ffmpeg.exec(ffmpegArgs);
+
+            // Check if output file was created
+            let data;
+            try {
+                data = await ffmpeg.readFile(outputName);
+            } catch (e) {
+                console.error("FFmpeg output not found.");
+                throw new Error(`FFmpeg failed to produce ${outputName}. Check debug logs.`);
+            }
+
+            // Cleanup
+            try { await ffmpeg.deleteFile(inputName); } catch (e) { }
+            try { await ffmpeg.deleteFile(outputName); } catch (e) { }
+
+            return new Blob([data.buffer], { type: 'video/mp4' });
+        }
+
+    </script>
+</body>
+
+</html>

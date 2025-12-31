@@ -1,0 +1,14 @@
+{
+    "name": "open-media-compressor",
+    "version": "1.0.0",
+    "description": "Ultra-minimalist browser-based media compressor",
+    "type": "module",
+    "scripts": {
+        "dev": "vite",
+        "build": "vite build",
+        "preview": "vite preview"
+    },
+    "devDependencies": {
+        "vite": "^5.0.0"
+    }
+}
