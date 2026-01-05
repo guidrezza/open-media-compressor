@@ -389,32 +389,27 @@
                 for (let fileObj of this.files) {
                     if (fileObj.status === 'done') continue; // Skip already done
 
-                    // Skip if already small enough
-                    if (fileObj.raw.size <= targetBytes) {
-                        console.log(`Skipping ${fileObj.raw.name}, already small enough.`);
-                        fileObj.status = 'done';
-                        // Still download it as requested by "passthrough" logic? 
-                        // Previous logic renamed it to _c and downloaded.
-                        this.downloadFile(fileObj.raw, this.getOutName(fileObj.raw.name));
-                        continue;
-                    }
+                    // Determine effective target size for metadata stripping
+                    // If file is smaller than target, we still re-encode (to strip metadata)
+                    // but we aim for the original file size so we don't bloat it unnecessarily.
+                    const effectiveTargetBytes = Math.min(fileObj.raw.size, targetBytes);
 
                     fileObj.status = 'processing';
                     fileObj.progress = 0;
 
                     try {
                         if (fileObj.raw.type.startsWith('video')) {
-                            const blob = await this.compressVideoWorker(fileObj, targetBytes);
+                            const blob = await this.compressVideoWorker(fileObj, effectiveTargetBytes);
                             this.downloadFile(blob, this.getOutName(fileObj.raw.name, '.mp4'));
                             fileObj.status = 'done';
                         } else if (fileObj.raw.type.startsWith('image') && !fileObj.raw.type.includes('gif')) {
                             // Fallback to main thread Image compression for now
-                            const blob = await this.compressImage(fileObj.raw, targetBytes);
+                            const blob = await this.compressImage(fileObj.raw, effectiveTargetBytes);
                             this.downloadFile(blob, this.getOutName(fileObj.raw.name, '.webp'));
                             fileObj.status = 'done';
                         } else if (fileObj.raw.type.includes('gif')) {
                             // GIF -> WebM via new Worker
-                            const blob = await this.compressGifWorker(fileObj, targetBytes);
+                            const blob = await this.compressGifWorker(fileObj, effectiveTargetBytes);
                             this.downloadFile(blob, this.getOutName(fileObj.raw.name, '.webm'));
                             fileObj.status = 'done';
                         } else {
