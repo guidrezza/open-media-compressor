@@ -45,23 +45,33 @@ async function compress(file, targetSizeBytes, config) {
                 return;
             }
 
+            // FRAGMENTED MP4 FIX:
+            // nb_samples might be 0 or undefined in fragmented files (moov doesn't have stts/stsz).
+            // We shouldn't rely on it for completion check if it's suspicious.
+            const totalExpected = videoTrack.nb_samples > 0 ? videoTrack.nb_samples : Infinity;
+            const isFragmented = totalExpected === Infinity;
+
             self.postMessage({
                 type: 'status',
-                message: `Found video track: ${videoTrack.video.width}x${videoTrack.video.height}, ${videoTrack.nb_samples} samples`
+                message: `Found video track: ${videoTrack.video.width}x${videoTrack.video.height}, ${isFragmented ? 'Fragmented (unknown count)' : totalExpected + ' samples'}`
             });
 
             // Set a new timeout specifically for extraction
             extractionTimeoutId = setTimeout(() => {
-                reject(new Error(`Timeout during sample extraction. Extracted ${extractedSamples.length}/${videoTrack.nb_samples} samples.`));
-            }, 20000); // 20s for extraction
+                reject(new Error(`Timeout during sample extraction. Extracted ${extractedSamples.length} samples.`));
+            }, 30000); // 30s for extraction
 
-            mp4boxfile.setExtractionOptions(videoTrack.id, null, { nbSamples: videoTrack.nb_samples });
+            // If nb_samples is 0/Infinity, pass a large number to extraction options or null to extract all?
+            // MP4Box documentation says nbSamples is for how many to extract.
+            // If we want all, we can pass something large.
+            const extractCount = isFragmented ? 1000000 : totalExpected;
+            mp4boxfile.setExtractionOptions(videoTrack.id, null, { nbSamples: extractCount });
             mp4boxfile.start();
 
             mp4boxfile.onSamples = (id, user, newSamples) => {
                 extractedSamples = extractedSamples.concat(newSamples);
 
-                if (extractedSamples.length >= videoTrack.nb_samples) {
+                if (extractedSamples.length >= totalExpected) {
                     // We have everything, no need to wait for Flush
                     clearTimeout(extractionTimeoutId);
                     resolve(extractedSamples);
@@ -69,9 +79,10 @@ async function compress(file, targetSizeBytes, config) {
                 }
 
                 if (extractedSamples.length % 100 === 0) {
+                    const progressStr = isFragmented ? `${extractedSamples.length} extracted` : `${extractedSamples.length} / ${totalExpected}`;
                     self.postMessage({
                         type: 'status',
-                        message: `Extracting: ${extractedSamples.length} / ${videoTrack.nb_samples} samples...`
+                        message: `Extracting: ${progressStr} samples...`
                     });
                 }
             };
