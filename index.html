@@ -342,6 +342,7 @@
 
     <script type="module">
         import Alpine from 'alpinejs';
+        import { stripWebPMetadata } from './src/webp_utils.js';
 
         window.Alpine = Alpine;
 
@@ -532,7 +533,9 @@
                 }
 
                 URL.revokeObjectURL(img.src);
-                return blob;
+
+                // Strip Metadata (EXIF, XMP, ICC)
+                return await stripWebPMetadata(blob);
             },
 
             downloadFile(blob, filename) {
