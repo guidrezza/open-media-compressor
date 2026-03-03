@@ -380,6 +380,27 @@
                 return (bytes / 1024 / 1024).toFixed(2) + ' MB';
             },
 
+            detectFileKind(file) {
+                const mime = (file?.type || '').toLowerCase();
+
+                if (mime.startsWith('video/')) return 'video';
+                if (mime === 'image/gif') return 'gif';
+                if (mime.startsWith('image/')) return 'image';
+
+                const fileName = (file?.name || '').toLowerCase();
+                const ext = fileName.includes('.') ? fileName.slice(fileName.lastIndexOf('.')) : '';
+
+                const videoExtensions = new Set(['.mp4', '.mov', '.m4v', '.webm', '.mkv', '.avi', '.wmv', '.flv']);
+                const gifExtensions = new Set(['.gif']);
+                const imageExtensions = new Set(['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tif', '.tiff', '.avif', '.heic', '.heif']);
+
+                if (videoExtensions.has(ext)) return 'video';
+                if (gifExtensions.has(ext)) return 'gif';
+                if (imageExtensions.has(ext)) return 'image';
+
+                return 'unsupported';
+            },
+
             async startCompression() {
                 this.isCompressing = true;
 
@@ -399,22 +420,29 @@
                     fileObj.progress = 0;
 
                     try {
-                        if (fileObj.raw.type.startsWith('video')) {
+                        const detectedKind = this.detectFileKind(fileObj.raw);
+                        const normalizedMime = (fileObj.raw.type || '').toLowerCase() || 'empty';
+                        const loweredName = (fileObj.raw.name || '').toLowerCase();
+                        const extension = loweredName.includes('.')
+                            ? loweredName.slice(loweredName.lastIndexOf('.'))
+                            : 'none';
+
+                        if (detectedKind === 'video') {
                             const blob = await this.compressVideoWorker(fileObj, effectiveTargetBytes);
                             this.downloadFile(blob, this.getOutName(fileObj.raw.name, '.mp4'));
                             fileObj.status = 'done';
-                        } else if (fileObj.raw.type.startsWith('image') && !fileObj.raw.type.includes('gif')) {
+                        } else if (detectedKind === 'image') {
                             // Fallback to main thread Image compression for now
                             const blob = await this.compressImage(fileObj.raw, effectiveTargetBytes);
                             this.downloadFile(blob, this.getOutName(fileObj.raw.name, '.webp'));
                             fileObj.status = 'done';
-                        } else if (fileObj.raw.type.includes('gif')) {
+                        } else if (detectedKind === 'gif') {
                             // GIF -> WebM via new Worker
                             const blob = await this.compressGifWorker(fileObj, effectiveTargetBytes);
                             this.downloadFile(blob, this.getOutName(fileObj.raw.name, '.webm'));
                             fileObj.status = 'done';
                         } else {
-                            throw new Error("Format not supported (Only Video, Image, and GIF)");
+                            throw new Error(`Format not supported (Only Video, Image, and GIF). Detected MIME: ${normalizedMime}, extension: ${extension}`);
                         }
                     } catch (e) {
                         console.error(e);
