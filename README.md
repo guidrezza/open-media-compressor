@@ -28,7 +28,12 @@ An ultra-minimalist, "Brutalist" single-page web application for media compressi
    npm run dev
    ```
 
-3. Build for production:
+3. Run the test suite:
+   ```bash
+   npm test
+   ```
+
+4. Build for production:
    ```bash
    npm run build
    ```
