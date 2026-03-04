@@ -24,6 +24,9 @@ async function compress(file, targetSizeBytes) {
 
     await decoder.tracks.ready;
     const track = decoder.tracks.selectedTrack;
+    if (!track) {
+        throw new Error('No selected GIF track was found by ImageDecoder.');
+    }
 
     // Log details
     self.postMessage({
@@ -34,40 +37,36 @@ async function compress(file, targetSizeBytes) {
 
 
     // 3. Setup Encoder
-    // We need to calculate bitrate. Duration?
-    // GIF duration is sum of frame durations.
+    // First pass: metadata/duration only (no frame retention)
     let totalDuration = 0;
-    // We can't easily iterate tracks without decoding. 
-    // Let's decode everything first? Or stream?
-    // Memory wise, streaming is better. But we need bitrate.
-    // Let's assume a reasonable bitrate or try to calculate on the fly? 
-    // VP9 is good at VBR.
-    // Let's do a quick pass to get duration? No, expensive.
-    // Let's use a default bitrate or try to estimate.
-    // Actually, ImageDecoder random access is fast. 
-
-    // Let's just start decoding to get dimensions and loop.
 
     let w = 0;
     let h = 0;
-    let frames = [];
 
-    // Read all frames to get total duration and data
-    // (GIFs are usually small enough to fit in memory, unlike long videos)
-    self.postMessage({ type: 'status', message: 'Decoding GIF frames...' });
+    self.postMessage({ type: 'status', message: 'Scanning GIF metadata...' });
 
     for (let i = 0; i < track.frameCount; i++) {
         const result = await decoder.decode({ frameIndex: i });
-        frames.push(result);
-        totalDuration += result.image.duration;
+        const srcFrame = result.image;
+        totalDuration += srcFrame.duration || 0;
 
         if (i === 0) {
-            w = result.image.displayWidth;
-            h = result.image.displayHeight;
+            w = srcFrame.displayWidth;
+            h = srcFrame.displayHeight;
         }
+
+        srcFrame.close();
     }
 
-    const durationSec = totalDuration / 1_000_000; // duration is in microseconds for ImageDecoder
+    let durationSec = totalDuration / 1_000_000; // duration is in microseconds for ImageDecoder
+    const fallbackFramerate = 12;
+    if (!(durationSec > 0)) {
+        durationSec = track.frameCount / fallbackFramerate;
+        self.postMessage({
+            type: 'status',
+            message: `Warning: GIF reported invalid duration. Falling back to ${fallbackFramerate}fps timing.`
+        });
+    }
 
     // Update Muxer metadata now that we have dimensions
     // Since we already created Muxer, and WebMMuxer might need dims in constructor for Header?
@@ -86,6 +85,9 @@ async function compress(file, targetSizeBytes) {
     const safetyFactor = 0.98;
     let targetBitrate = Math.floor((targetSizeBytes * 8 * safetyFactor) / durationSec);
     targetBitrate = Math.max(targetBitrate, 50000); // 50kbps min
+    const framerate = durationSec > 0 ? track.frameCount / durationSec : fallbackFramerate;
+    const safeFramerate = framerate > 0 ? framerate : fallbackFramerate;
+    const defaultFrameDurationUs = Math.round(1_000_000 / safeFramerate);
 
     self.postMessage({
         type: 'status',
@@ -97,8 +99,8 @@ async function compress(file, targetSizeBytes) {
         output: (chunk, meta) => {
             finalMuxer.addVideoChunk(chunk, meta);
             encodedFramesCount++;
-            if (encodedFramesCount % 10 === 0 || encodedFramesCount === frames.length) {
-                const p = Math.round((encodedFramesCount / frames.length) * 100);
+            if (encodedFramesCount % 10 === 0 || encodedFramesCount === track.frameCount) {
+                const p = Math.round((encodedFramesCount / track.frameCount) * 100);
                 self.postMessage({ type: 'progress', value: p });
             }
         },
@@ -112,7 +114,7 @@ async function compress(file, targetSizeBytes) {
         width: w,
         height: h,
         bitrate: targetBitrate,
-        framerate: frames.length / durationSec,
+        framerate: safeFramerate,
         bitrateMode: 'constant'
     };
 
@@ -122,7 +124,10 @@ async function compress(file, targetSizeBytes) {
     // We need timestamps in microseconds for VideoFrame
     let currentTimestamp = 0;
 
-    for (const frameResult of frames) {
+    self.postMessage({ type: 'status', message: 'Decoding + encoding GIF frames...' });
+
+    for (let i = 0; i < track.frameCount; i++) {
+        const frameResult = await decoder.decode({ frameIndex: i });
         const srcFrame = frameResult.image;
         // ImageDecoder returns VideoFrames (or ImageBitmaps that can be made into VideoFrames)
         // srcFrame IS a VideoFrame in recent implementations.
@@ -135,16 +140,17 @@ async function compress(file, targetSizeBytes) {
         // Let's re-wrap to ensure timestamp continuity from 0 if needed.
         // Actually, let's just use the duration accumulation to be safe.
 
+        const frameDuration = srcFrame.duration || defaultFrameDurationUs;
         const frame = new VideoFrame(srcFrame, {
             timestamp: currentTimestamp,
-            duration: srcFrame.duration
+            duration: frameDuration
         });
 
         encoder.encode(frame);
         frame.close();
         srcFrame.close(); // Close original
 
-        currentTimestamp += srcFrame.duration;
+        currentTimestamp += frameDuration;
     }
 
     await encoder.flush();
