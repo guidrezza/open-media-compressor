@@ -442,6 +442,43 @@
                 return (bytes / 1024 / 1024).toFixed(2) + ' MB';
             },
 
+            detectFileKind(file) {
+                const mime = (file?.type || '').toLowerCase();
+
+                if (mime.startsWith('video/')) return 'video';
+                if (mime === 'image/gif') return 'gif';
+                if (mime.startsWith('image/')) return 'image';
+
+                const fileName = (file?.name || '').toLowerCase();
+                const ext = fileName.includes('.') ? fileName.slice(fileName.lastIndexOf('.')) : '';
+
+                const videoExtensions = new Set(['.mp4', '.mov', '.m4v', '.webm', '.mkv', '.avi', '.wmv', '.flv']);
+                const gifExtensions = new Set(['.gif']);
+                const imageExtensions = new Set(['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tif', '.tiff', '.avif', '.heic', '.heif']);
+
+                if (videoExtensions.has(ext)) return 'video';
+                if (gifExtensions.has(ext)) return 'gif';
+                if (imageExtensions.has(ext)) return 'image';
+
+                return 'unsupported';
+            },
+
+            getConversionPath(file) {
+                return this.detectFileKind(file);
+            },
+
+            assertConversionSupport(path, file) {
+                if (path !== 'unsupported') return;
+
+                const normalizedMime = (file?.type || '').toLowerCase() || 'empty';
+                const loweredName = (file?.name || '').toLowerCase();
+                const extension = loweredName.includes('.')
+                    ? loweredName.slice(loweredName.lastIndexOf('.'))
+                    : 'none';
+
+                throw new Error(`Format not supported (Only Video, Image, and GIF). Detected MIME: ${normalizedMime}, extension: ${extension}`);
+            },
+
             async startCompression() {
                 this.isCompressing = true;
 
@@ -463,7 +500,7 @@
 
                     try {
                         const path = this.getConversionPath(fileObj.raw);
-                        this.assertConversionSupport(path);
+                        this.assertConversionSupport(path, fileObj.raw);
 
                         if (path === 'video') {
                             const blob = await this.compressVideoWorker(fileObj, effectiveTargetBytes);
@@ -479,8 +516,6 @@
                             const blob = await this.compressGifWorker(fileObj, effectiveTargetBytes);
                             this.downloadFile(blob, this.getOutName(fileObj.raw.name, '.webm'));
                             fileObj.status = 'done';
-                        } else {
-                            throw new Error("Format not supported (Only Video, Image, and GIF)");
                         }
                     } catch (e) {
                         console.error(e);
