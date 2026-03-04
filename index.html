@@ -577,47 +577,81 @@
 
                 // Ported from legacy code
                 const img = new Image();
-                img.src = URL.createObjectURL(file);
-                await new Promise(r => img.onload = r);
+                const objectUrl = URL.createObjectURL(file);
 
-                const canvas = document.createElement('canvas');
-                const ctx = canvas.getContext('2d');
+                try {
+                    await new Promise((resolve, reject) => {
+                        img.onload = () => {
+                            img.onload = null;
+                            img.onerror = null;
+                            resolve();
+                        };
+                        img.onerror = () => {
+                            img.onload = null;
+                            img.onerror = null;
+                            reject(new Error(`Failed to decode image file "${file.name}".`));
+                        };
+                        img.src = objectUrl;
+                    });
 
-                let width = img.width;
-                let height = img.height;
+                    const canvas = document.createElement('canvas');
+                    const ctx = canvas.getContext('2d');
 
-                const getBlob = (q, w, h) => {
-                    canvas.width = w;
-                    canvas.height = h;
-                    ctx.drawImage(img, 0, 0, w, h);
-                    return new Promise(r => canvas.toBlob(r, 'image/webp', q));
-                };
+                    let width = img.width;
+                    let height = img.height;
 
-                const sizeRatio = targetBytes / file.size;
-                let quality = Math.min(0.95, Math.max(0.1, sizeRatio * 1.2));
-                let blob = await getBlob(quality, width, height);
+                    const getBlob = (q, w, h) => {
+                        canvas.width = w;
+                        canvas.height = h;
+                        ctx.drawImage(img, 0, 0, w, h);
+                        return new Promise((resolve, reject) => {
+                            canvas.toBlob((result) => {
+                                if (!result) {
+                                    reject(new Error(`Failed to create compressed image blob for "${file.name}".`));
+                                    return;
+                                }
+                                resolve(result);
+                            }, 'image/webp', q);
+                        });
+                    };
 
-                if (blob.size > targetBytes) {
-                    let low = 0.05, high = quality;
-                    for (let i = 0; i < 6 && blob.size > targetBytes; i++) {
-                        quality = (low + high) / 2;
-                        blob = await getBlob(quality, width, height);
-                        if (blob.size > targetBytes) high = quality;
-                        else low = quality;
+                    const sizeRatio = targetBytes / file.size;
+                    let quality = Math.min(0.95, Math.max(0.1, sizeRatio * 1.2));
+                    let blob = await getBlob(quality, width, height);
+
+                    if (!blob) {
+                        throw new Error(`Initial compression attempt returned no blob for "${file.name}".`);
                     }
+
+                    if (blob.size > targetBytes) {
+                        let low = 0.05, high = quality;
+                        for (let i = 0; i < 6 && blob && blob.size > targetBytes; i++) {
+                            quality = (low + high) / 2;
+                            blob = await getBlob(quality, width, height);
+                            if (!blob) {
+                                throw new Error(`Compression iteration ${i + 1} returned no blob for "${file.name}".`);
+                            }
+                            if (blob.size > targetBytes) high = quality;
+                            else low = quality;
+                        }
+                    }
+
+                    if (blob.size > targetBytes && quality <= 0.1) {
+                        const scaleFactor = Math.sqrt(targetBytes / blob.size) * 0.9;
+                        width = Math.floor(width * scaleFactor);
+                        height = Math.floor(height * scaleFactor);
+                        blob = await getBlob(0.8, width, height);
+
+                        if (!blob) {
+                            throw new Error(`Downscale compression returned no blob for "${file.name}".`);
+                        }
+                    }
+
+                    // Strip Metadata (EXIF, XMP, ICC)
+                    return await stripWebPMetadata(blob);
+                } finally {
+                    URL.revokeObjectURL(objectUrl);
                 }
-
-                if (blob.size > targetBytes && quality <= 0.1) {
-                    const scaleFactor = Math.sqrt(targetBytes / blob.size) * 0.9;
-                    width = Math.floor(width * scaleFactor);
-                    height = Math.floor(height * scaleFactor);
-                    blob = await getBlob(0.8, width, height);
-                }
-
-                URL.revokeObjectURL(img.src);
-
-                // Strip Metadata (EXIF, XMP, ICC)
-                return await stripWebPMetadata(blob);
             },
 
             downloadFile(blob, filename) {
