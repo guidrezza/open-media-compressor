@@ -352,6 +352,67 @@
             isCompressing: false,
             maxSize: 10,
             unit: 'MB',
+            capabilities: {
+                worker: false,
+                videoEncoder: false,
+                videoDecoder: false,
+                imageDecoder: false,
+                offscreenCanvas: false
+            },
+
+            init() {
+                this.probeCapabilities();
+            },
+
+            probeCapabilities() {
+                this.capabilities.worker = typeof Worker !== 'undefined';
+                this.capabilities.videoEncoder = typeof VideoEncoder !== 'undefined';
+                this.capabilities.videoDecoder = typeof VideoDecoder !== 'undefined';
+                this.capabilities.imageDecoder = typeof ImageDecoder !== 'undefined';
+                this.capabilities.offscreenCanvas = typeof OffscreenCanvas !== 'undefined';
+            },
+
+            getMissingApis(requirements) {
+                return requirements.filter((api) => !this.capabilities[api]);
+            },
+
+            getSupportErrorForPath(path) {
+                const pathRequirements = {
+                    video: ['worker', 'videoEncoder', 'videoDecoder', 'offscreenCanvas'],
+                    gif: ['worker', 'videoEncoder', 'imageDecoder', 'offscreenCanvas'],
+                    image: []
+                };
+
+                const missing = this.getMissingApis(pathRequirements[path] || []);
+                if (!missing.length) return null;
+
+                const messages = {
+                    worker: 'Web Workers',
+                    videoEncoder: 'WebCodecs video encoding',
+                    videoDecoder: 'WebCodecs video decoding',
+                    imageDecoder: 'ImageDecoder API',
+                    offscreenCanvas: 'OffscreenCanvas'
+                };
+
+                const firstMissing = missing[0];
+                if (firstMissing === 'videoEncoder') {
+                    return 'Your browser does not support WebCodecs video encoding. Try latest Chrome/Edge.';
+                }
+
+                return `Your browser does not support ${messages[firstMissing]}. Try latest Chrome/Edge.`;
+            },
+
+            getConversionPath(file) {
+                if (file.type.startsWith('video')) return 'video';
+                if (file.type.startsWith('image') && !file.type.includes('gif')) return 'image';
+                if (file.type.includes('gif')) return 'gif';
+                return 'unsupported';
+            },
+
+            assertConversionSupport(path) {
+                const errorMessage = this.getSupportErrorForPath(path);
+                if (errorMessage) throw new Error(errorMessage);
+            },
 
             handleDrop(e) {
                 this.isDragging = false;
@@ -367,7 +428,8 @@
                     this.files.push({
                         raw: fileList[i],
                         status: null, // null, 'processing', 'done', 'error'
-                        progress: 0
+                        progress: 0,
+                        statusMessage: this.getSupportErrorForPath(this.getConversionPath(fileList[i]))
                     });
                 }
             },
@@ -397,18 +459,22 @@
 
                     fileObj.status = 'processing';
                     fileObj.progress = 0;
+                    fileObj.statusMessage = '';
 
                     try {
-                        if (fileObj.raw.type.startsWith('video')) {
+                        const path = this.getConversionPath(fileObj.raw);
+                        this.assertConversionSupport(path);
+
+                        if (path === 'video') {
                             const blob = await this.compressVideoWorker(fileObj, effectiveTargetBytes);
                             this.downloadFile(blob, this.getOutName(fileObj.raw.name, '.mp4'));
                             fileObj.status = 'done';
-                        } else if (fileObj.raw.type.startsWith('image') && !fileObj.raw.type.includes('gif')) {
+                        } else if (path === 'image') {
                             // Fallback to main thread Image compression for now
                             const blob = await this.compressImage(fileObj.raw, effectiveTargetBytes);
                             this.downloadFile(blob, this.getOutName(fileObj.raw.name, '.webp'));
                             fileObj.status = 'done';
-                        } else if (fileObj.raw.type.includes('gif')) {
+                        } else if (path === 'gif') {
                             // GIF -> WebM via new Worker
                             const blob = await this.compressGifWorker(fileObj, effectiveTargetBytes);
                             this.downloadFile(blob, this.getOutName(fileObj.raw.name, '.webm'));
@@ -428,6 +494,13 @@
 
             compressVideoWorker(fileObj, targetBytes) {
                 return new Promise((resolve, reject) => {
+                    try {
+                        this.assertConversionSupport('video');
+                    } catch (e) {
+                        reject(e);
+                        return;
+                    }
+
                     // Create the worker
                     const worker = new Worker(new URL('./src/compression.worker.js', import.meta.url), { type: 'module' });
 
@@ -462,6 +535,13 @@
 
             compressGifWorker(fileObj, targetBytes) {
                 return new Promise((resolve, reject) => {
+                    try {
+                        this.assertConversionSupport('gif');
+                    } catch (e) {
+                        reject(e);
+                        return;
+                    }
+
                     const worker = new Worker(new URL('./src/gif.worker.js', import.meta.url), { type: 'module' });
 
                     worker.onerror = (err) => {
@@ -493,6 +573,8 @@
             },
 
             async compressImage(file, targetBytes) {
+                this.assertConversionSupport('image');
+
                 // Ported from legacy code
                 const img = new Image();
                 img.src = URL.createObjectURL(file);
