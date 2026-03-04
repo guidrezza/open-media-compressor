@@ -174,6 +174,38 @@ async function compress(file, targetSizeBytes, config) {
 async function processVideo(mp4boxfile, track, bitrate, samples) {
     const totalSamples = samples.length;
     let encodedFrames = 0;
+    let aborted = false;
+    let abortError = null;
+    let rejectAbort = null;
+    let encoder = null;
+    let decoder = null;
+
+    const abortPromise = new Promise((_, reject) => {
+        rejectAbort = reject;
+    });
+
+    const abortWithError = (message) => {
+        if (aborted) {
+            return;
+        }
+
+        aborted = true;
+        abortError = message instanceof Error ? message : new Error(message);
+
+        if (decoder) {
+            try {
+                decoder.close();
+            } catch (e) { }
+        }
+
+        if (encoder) {
+            try {
+                encoder.close();
+            } catch (e) { }
+        }
+
+        rejectAbort(abortError);
+    };
 
     // Determine scale factor based on bitrate and resolution
     // Standard bitrate guidelines: 1080p needs ~2-4Mbps, 720p ~1-2Mbps, 480p ~0.5-1Mbps
@@ -244,8 +276,12 @@ async function processVideo(mp4boxfile, track, bitrate, samples) {
     });
 
     // 6. Setup Encoder - track progress on output
-    const encoder = new VideoEncoder({
+    encoder = new VideoEncoder({
         output: (chunk, meta) => {
+            if (aborted) {
+                return;
+            }
+
             muxer.addVideoChunk(chunk, meta);
             encodedFrames++;
             // Report progress based on encoded frames
@@ -255,7 +291,7 @@ async function processVideo(mp4boxfile, track, bitrate, samples) {
             }
         },
         error: (e) => {
-            self.postMessage({ type: 'error', message: 'Encoder error: ' + e.message });
+            abortWithError('Encoder error: ' + e.message);
         }
     });
 
@@ -308,8 +344,13 @@ async function processVideo(mp4boxfile, track, bitrate, samples) {
 
     // 7. Setup Decoder
     self.postMessage({ type: 'status', message: 'Configuring Decoder...' });
-    const decoder = new VideoDecoder({
+    decoder = new VideoDecoder({
         output: (frame) => {
+            if (aborted) {
+                frame.close();
+                return;
+            }
+
             if (scale < 1 && ctx) {
                 // Draw to resize
                 ctx.drawImage(frame, 0, 0, finalWidth, finalHeight);
@@ -325,7 +366,7 @@ async function processVideo(mp4boxfile, track, bitrate, samples) {
             frame.close();
         },
         error: (e) => {
-            self.postMessage({ type: 'error', message: 'Decoder error: ' + e.message });
+            abortWithError('Decoder error: ' + e.message);
         }
     });
 
@@ -347,28 +388,45 @@ async function processVideo(mp4boxfile, track, bitrate, samples) {
 
     const QUEUE_LIMIT = 10; // Max items in queue before waiting
 
-    for (let i = 0; i < totalSamples; i++) {
-        const sample = samples[i];
+    const processPipeline = (async () => {
+        for (let i = 0; i < totalSamples; i++) {
+            if (aborted) {
+                break;
+            }
 
-        const type = sample.is_sync ? 'key' : 'delta';
-        const chunk = new EncodedVideoChunk({
-            type: type,
-            timestamp: (sample.cts / track.timescale) * 1_000_000,
-            duration: (sample.duration / track.timescale) * 1_000_000,
-            data: sample.data
-        });
+            const sample = samples[i];
 
-        // Backpressure: wait if decoder or encoder queues are too full
-        while (decoder.decodeQueueSize > QUEUE_LIMIT || encoder.encodeQueueSize > QUEUE_LIMIT) {
-            await new Promise(resolve => setTimeout(resolve, 5));
+            const type = sample.is_sync ? 'key' : 'delta';
+            const chunk = new EncodedVideoChunk({
+                type: type,
+                timestamp: (sample.cts / track.timescale) * 1_000_000,
+                duration: (sample.duration / track.timescale) * 1_000_000,
+                data: sample.data
+            });
+
+            // Backpressure: wait if decoder or encoder queues are too full
+            while (!aborted && (decoder.decodeQueueSize > QUEUE_LIMIT || encoder.encodeQueueSize > QUEUE_LIMIT)) {
+                await new Promise(resolve => setTimeout(resolve, 5));
+            }
+
+            if (aborted) {
+                break;
+            }
+
+            decoder.decode(chunk);
         }
 
-        decoder.decode(chunk);
-    }
+        if (aborted) {
+            throw abortError;
+        }
 
-    // Flush pipeline
-    await decoder.flush();
-    await encoder.flush();
+        // Flush pipeline
+        await decoder.flush();
+        await encoder.flush();
+    })();
+
+    await Promise.race([processPipeline, abortPromise]);
+
     muxer.finalize();
 
     const buffer = muxer.target.buffer;
