@@ -26,13 +26,16 @@ async function compress(file, targetSizeBytes) {
     // 2. Parse & Extract
     const mp4boxfile = MP4Box.createFile();
     let videoTrack = null;
+    let audioTrack = null;
 
     self.postMessage({ type: 'status', message: 'Parsing and extracting...' });
 
     const samplesPromise = new Promise((resolve, reject) => {
-        let extractedSamples = [];
+        let extractedVideoSamples = [];
+        let extractedAudioSamples = [];
         let processingStarted = false;
         let extractionTimeoutId = null;
+        let settled = false;
 
         // Add 10s timeout for parsing start
         const timeoutId = setTimeout(() => {
@@ -45,6 +48,7 @@ async function compress(file, targetSizeBytes) {
             clearTimeout(timeoutId);
             processingStarted = true;
             videoTrack = info.videoTracks[0];
+            audioTrack = info.audioTracks[0] || null;
 
             if (!videoTrack) {
                 reject(new Error('No video track found in file'));
@@ -54,38 +58,53 @@ async function compress(file, targetSizeBytes) {
             // FRAGMENTED MP4 FIX:
             // nb_samples might be 0 or undefined in fragmented files (moov doesn't have stts/stsz).
             // We shouldn't rely on it for completion check if it's suspicious.
-            const totalExpected = videoTrack.nb_samples > 0 ? videoTrack.nb_samples : Infinity;
-            const isFragmented = totalExpected === Infinity;
+            const totalExpectedVideo = videoTrack.nb_samples > 0 ? videoTrack.nb_samples : Infinity;
+            const totalExpectedAudio = audioTrack && audioTrack.nb_samples > 0 ? audioTrack.nb_samples : (audioTrack ? Infinity : 0);
+            const isFragmentedVideo = totalExpectedVideo === Infinity;
+            const isFragmentedAudio = audioTrack ? totalExpectedAudio === Infinity : false;
 
             self.postMessage({
                 type: 'status',
-                message: `Found video track: ${videoTrack.video.width}x${videoTrack.video.height}, ${isFragmented ? 'Fragmented (unknown count)' : totalExpected + ' samples'}`
+                message: `Found video track: ${videoTrack.video.width}x${videoTrack.video.height}, ${isFragmentedVideo ? 'Fragmented (unknown count)' : totalExpectedVideo + ' samples'}${audioTrack ? ` + audio track (${isFragmentedAudio ? 'unknown' : totalExpectedAudio} samples)` : ''}`
             });
 
             // Set a new timeout specifically for extraction
             extractionTimeoutId = setTimeout(() => {
-                reject(new Error(`Timeout during sample extraction. Extracted ${extractedSamples.length} samples.`));
+                reject(new Error(`Timeout during sample extraction. Extracted ${extractedVideoSamples.length} video samples and ${extractedAudioSamples.length} audio samples.`));
             }, 30000); // 30s for extraction
 
             // If nb_samples is 0/Infinity, pass a large number to extraction options or null to extract all?
             // MP4Box documentation says nbSamples is for how many to extract.
             // If we want all, we can pass something large.
-            const extractCount = isFragmented ? 1000000 : totalExpected;
-            mp4boxfile.setExtractionOptions(videoTrack.id, null, { nbSamples: extractCount });
+            const extractVideoCount = isFragmentedVideo ? 1000000 : totalExpectedVideo;
+            mp4boxfile.setExtractionOptions(videoTrack.id, null, { nbSamples: extractVideoCount });
+
+            if (audioTrack) {
+                const extractAudioCount = isFragmentedAudio ? 1000000 : totalExpectedAudio;
+                mp4boxfile.setExtractionOptions(audioTrack.id, null, { nbSamples: extractAudioCount });
+            }
             mp4boxfile.start();
 
             mp4boxfile.onSamples = (id, user, newSamples) => {
-                extractedSamples = extractedSamples.concat(newSamples);
+                if (id === videoTrack.id) {
+                    extractedVideoSamples = extractedVideoSamples.concat(newSamples);
+                } else if (audioTrack && id === audioTrack.id) {
+                    extractedAudioSamples = extractedAudioSamples.concat(newSamples);
+                }
 
-                if (extractedSamples.length >= totalExpected) {
+                const hasAllVideo = extractedVideoSamples.length >= totalExpectedVideo;
+                const hasAllAudio = !audioTrack || extractedAudioSamples.length >= totalExpectedAudio;
+
+                if (!settled && hasAllVideo && hasAllAudio) {
                     // We have everything, no need to wait for Flush
+                    settled = true;
                     clearTimeout(extractionTimeoutId);
-                    resolve(extractedSamples);
+                    resolve({ videoSamples: extractedVideoSamples, audioSamples: extractedAudioSamples });
                     return;
                 }
 
-                if (extractedSamples.length % 100 === 0) {
-                    const progressStr = isFragmented ? `${extractedSamples.length} extracted` : `${extractedSamples.length} / ${totalExpected}`;
+                if (extractedVideoSamples.length % 100 === 0) {
+                    const progressStr = isFragmentedVideo ? `${extractedVideoSamples.length} extracted` : `${extractedVideoSamples.length} / ${totalExpectedVideo}`;
                     self.postMessage({
                         type: 'status',
                         message: `Extracting: ${progressStr} samples...`
@@ -97,9 +116,10 @@ async function compress(file, targetSizeBytes) {
                 clearTimeout(extractionTimeoutId);
                 // Only resolve if we haven't already (though promise resolves once)
                 // If onSamples caught it, this does nothing.
-                if (extractedSamples.length > 0) {
-                    resolve(extractedSamples);
-                } else {
+                if (!settled && extractedVideoSamples.length > 0) {
+                    settled = true;
+                    resolve({ videoSamples: extractedVideoSamples, audioSamples: extractedAudioSamples });
+                } else if (!settled) {
                     reject(new Error('No samples extracted from file via MP4Box (onFlush)'));
                 }
             };
@@ -124,7 +144,10 @@ async function compress(file, targetSizeBytes) {
         throw new Error(`Parsing failed: ${e.message}`);
     }
 
-    const totalSamples = samples.length;
+    const videoSamples = samples.videoSamples;
+    const audioSamples = samples.audioSamples;
+
+    const totalSamples = videoSamples.length;
 
     if (!videoTrack) {
         throw new Error('No video track identified');
@@ -146,8 +169,8 @@ async function compress(file, targetSizeBytes) {
 
     // Fallback to sample calculation if metadata is 0 or missing
     if (!durationSec || durationSec <= 0) {
-        const firstSample = samples[0];
-        const lastSample = samples[totalSamples - 1];
+        const firstSample = videoSamples[0];
+        const lastSample = videoSamples[totalSamples - 1];
         const durationInTimescale = (lastSample.cts + lastSample.duration) - firstSample.cts;
         durationSec = durationInTimescale / videoTrack.timescale;
     }
@@ -156,18 +179,29 @@ async function compress(file, targetSizeBytes) {
         throw new Error('Could not calculate valid duration from file metadata');
     }
 
+    const audioConfig = getMuxerAudioConfig(audioTrack);
+    if (audioTrack && !audioConfig) {
+        self.postMessage({
+            type: 'status',
+            message: `Audio codec ${audioTrack.codec} is not supported for passthrough; output will be video-only.`
+        });
+    }
+
+    const audioReservationBytes = audioConfig ? estimateAudioPassthroughBytes(audioSamples) : 0;
+    const videoTargetBytes = Math.max(1, targetSizeBytes - audioReservationBytes);
+
     // 4. Calculate bitrate + overhead budget from actual timing
     const encodePlan = buildVideoEncodePlan({
         track: videoTrack,
-        samples,
+        samples: videoSamples,
         durationSec,
-        targetSizeBytes
+        targetSizeBytes: videoTargetBytes
     });
     let targetBitrate = encodePlan.targetBitrate;
 
     self.postMessage({
         type: 'status',
-        message: `Video: ${durationSec.toFixed(1)}s at ${encodePlan.frameRate.toFixed(2)}fps. Target: ${(targetSizeBytes / 1024 / 1024).toFixed(1)}MB. Reserved overhead: ${(encodePlan.overheadBytes / 1024).toFixed(0)}KB. Bitrate: ${Math.round(targetBitrate / 1000)}k${encodePlan.wasClamped ? ' (min-clamped)' : ''}`
+        message: `Video: ${durationSec.toFixed(1)}s at ${encodePlan.frameRate.toFixed(2)}fps. Target: ${(targetSizeBytes / 1024 / 1024).toFixed(1)}MB.${audioReservationBytes > 0 ? ` Audio passthrough: ${(audioReservationBytes / 1024).toFixed(0)}KB.` : ''} Reserved overhead: ${(encodePlan.overheadBytes / 1024).toFixed(0)}KB. Bitrate: ${Math.round(targetBitrate / 1000)}k${encodePlan.wasClamped ? ' (min-clamped)' : ''}`
     });
 
     const maxAttempts = 2;
@@ -184,7 +218,10 @@ async function compress(file, targetSizeBytes) {
         const encodedBlob = await processVideo(mp4boxfile, videoTrack, {
             bitrate: targetBitrate,
             frameRate: encodePlan.frameRate,
-            samples
+            videoSamples,
+            audioTrack,
+            audioSamples,
+            audioConfig
         });
         const sanitizedBlob = await sanitizeMp4Blob(encodedBlob);
 
@@ -211,8 +248,8 @@ async function compress(file, targetSizeBytes) {
     self.postMessage({ type: 'done', blob: finalBlob });
 }
 
-async function processVideo(mp4boxfile, track, { bitrate, frameRate, samples }) {
-    const totalSamples = samples.length;
+async function processVideo(mp4boxfile, track, { bitrate, frameRate, videoSamples, audioTrack, audioSamples, audioConfig }) {
+    const totalSamples = videoSamples.length;
     let encodedFrames = 0;
     let aborted = false;
     let abortError = null;
@@ -290,6 +327,7 @@ async function processVideo(mp4boxfile, track, { bitrate, frameRate, samples }) 
             width: finalWidth,
             height: finalHeight
         },
+        ...(audioConfig ? { audio: audioConfig } : {}),
         fastStart: 'in-memory'
     });
 
@@ -412,7 +450,7 @@ async function processVideo(mp4boxfile, track, { bitrate, frameRate, samples }) 
                 break;
             }
 
-            const sample = samples[i];
+            const sample = videoSamples[i];
 
             const type = sample.is_sync ? 'key' : 'delta';
             const chunk = new EncodedVideoChunk({
@@ -459,10 +497,61 @@ async function processVideo(mp4boxfile, track, { bitrate, frameRate, samples }) 
         }
     }
 
+    if (audioConfig && audioSamples && audioSamples.length > 0) {
+        const audioDescription = getAudioTrackDescription(mp4boxfile, audioTrack);
+        const audioMeta = audioDescription
+            ? { decoderConfig: { codec: audioTrack.codec, description: audioDescription } }
+            : undefined;
+
+        audioSamples.forEach((sample, index) => {
+            muxer.addAudioChunkRaw(
+                sample.data,
+                sample.is_sync === false ? 'delta' : 'key',
+                (sample.cts / audioTrack.timescale) * 1_000_000,
+                (sample.duration / audioTrack.timescale) * 1_000_000,
+                index === 0 ? audioMeta : undefined
+            );
+        });
+    }
+
     muxer.finalize();
 
     const buffer = muxer.target.buffer;
     return new Blob([buffer], { type: 'video/mp4' });
+}
+
+function estimateAudioPassthroughBytes(samples) {
+    if (!samples || samples.length === 0) {
+        return 0;
+    }
+
+    const payloadBytes = samples.reduce((total, sample) => total + sample.data.byteLength, 0);
+    const containerOverheadBytes = 4096 + (samples.length * 8);
+
+    return payloadBytes + containerOverheadBytes;
+}
+
+function getMuxerAudioConfig(track) {
+    if (!track || !track.audio) {
+        return null;
+    }
+
+    let codec = null;
+    if (track.codec && track.codec.startsWith('mp4a')) {
+        codec = 'aac';
+    } else if (track.codec && track.codec.toLowerCase().startsWith('opus')) {
+        codec = 'opus';
+    }
+
+    if (!codec) {
+        return null;
+    }
+
+    return {
+        codec,
+        numberOfChannels: track.audio.channel_count || 2,
+        sampleRate: track.audio.sample_rate || track.timescale
+    };
 }
 
 function getTrackDescription(mp4boxfile, track) {
@@ -485,5 +574,23 @@ function getTrackDescription(mp4boxfile, track) {
 
     // For some tracks (like HVC1), description might be in different boxes or optional
     // WebCodecs sometimes handles it without description for some containers.
+    return undefined;
+}
+
+function getAudioTrackDescription(mp4boxfile, track) {
+    if (!track) return undefined;
+
+    const traks = mp4boxfile.moov.traks;
+    const t = traks.find(t => t.tkhd.track_id === track.id);
+    if (!t) return undefined;
+
+    const entry = t.mdia.minf.stbl.stsd.entries[0];
+    if (!entry) return undefined;
+
+    const box = entry.esds;
+    if (box && box.esd && box.esd.descs && box.esd.descs[0] && box.esd.descs[0].descs && box.esd.descs[0].descs[0]) {
+        return box.esd.descs[0].descs[0].data;
+    }
+
     return undefined;
 }
