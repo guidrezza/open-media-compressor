@@ -1,4 +1,5 @@
 import * as WebMMuxer from 'webm-muxer';
+import { sanitizeWebMBuffer } from './media_sanitizers.js';
 
 self.onmessage = async (e) => {
     const { file, targetSizeBytes } = e.data;
@@ -68,6 +69,10 @@ async function compress(file, targetSizeBytes) {
         });
     }
 
+    const framerate = durationSec > 0 ? track.frameCount / durationSec : fallbackFramerate;
+    const safeFramerate = framerate > 0 ? framerate : fallbackFramerate;
+    const defaultFrameDurationUs = Math.round(1_000_000 / safeFramerate);
+
     // Update Muxer metadata now that we have dimensions
     // Since we already created Muxer, and WebMMuxer might need dims in constructor for Header?
     // Checking docs... usually yes. 
@@ -77,7 +82,8 @@ async function compress(file, targetSizeBytes) {
         video: {
             codec: 'V_VP9',
             width: w,
-            height: h
+            height: h,
+            frameRate: safeFramerate
         }
     });
 
@@ -85,9 +91,6 @@ async function compress(file, targetSizeBytes) {
     const safetyFactor = 0.98;
     let targetBitrate = Math.floor((targetSizeBytes * 8 * safetyFactor) / durationSec);
     targetBitrate = Math.max(targetBitrate, 50000); // 50kbps min
-    const framerate = durationSec > 0 ? track.frameCount / durationSec : fallbackFramerate;
-    const safeFramerate = framerate > 0 ? framerate : fallbackFramerate;
-    const defaultFrameDurationUs = Math.round(1_000_000 / safeFramerate);
 
     self.postMessage({
         type: 'status',
@@ -109,16 +112,36 @@ async function compress(file, targetSizeBytes) {
         }
     });
 
-    const config = {
-        codec: 'vp09.00.10.08',
-        width: w,
-        height: h,
-        bitrate: targetBitrate,
-        framerate: safeFramerate,
-        bitrateMode: 'constant'
-    };
+    const configsToTry = [
+        {
+            codec: 'vp09.00.10.08',
+            width: w,
+            height: h,
+            bitrate: targetBitrate,
+            framerate: safeFramerate,
+            bitrateMode: 'constant'
+        },
+        {
+            codec: 'vp09.00.10.08',
+            width: w,
+            height: h,
+            bitrate: targetBitrate,
+            framerate: safeFramerate
+        }
+    ];
 
-    encoder.configure(config);
+    let selectedConfig = configsToTry[configsToTry.length - 1];
+    for (const config of configsToTry) {
+        try {
+            const support = await VideoEncoder.isConfigSupported(config);
+            if (support.supported) {
+                selectedConfig = config;
+                break;
+            }
+        } catch (e) { }
+    }
+
+    encoder.configure(selectedConfig);
 
     // Encode
     // We need timestamps in microseconds for VideoFrame
@@ -155,9 +178,11 @@ async function compress(file, targetSizeBytes) {
 
     await encoder.flush();
     finalMuxer.finalize();
+    encoder.close();
+    decoder.close();
 
-    const buffer = finalMuxer.target.buffer;
-    const blob = new Blob([buffer], { type: 'video/webm' });
+    const sanitizedBuffer = sanitizeWebMBuffer(finalMuxer.target.buffer);
+    const blob = new Blob([sanitizedBuffer], { type: 'video/webm' });
 
     self.postMessage({ type: 'progress', value: 100 });
     self.postMessage({ type: 'done', blob: blob });

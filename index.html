@@ -402,14 +402,7 @@
                 return `Your browser does not support ${messages[firstMissing]}. Try latest Chrome/Edge.`;
             },
 
-            getConversionPath(file) {
-                if (file.type.startsWith('video')) return 'video';
-                if (file.type.startsWith('image') && !file.type.includes('gif')) return 'image';
-                if (file.type.includes('gif')) return 'gif';
-                return 'unsupported';
-            },
-
-            assertConversionSupport(path) {
+            assertBrowserSupport(path) {
                 const errorMessage = this.getSupportErrorForPath(path);
                 if (errorMessage) throw new Error(errorMessage);
             },
@@ -421,15 +414,17 @@
 
             handleFiles(e) {
                 this.addFiles(e.target.files);
+                e.target.value = '';
             },
 
             addFiles(fileList) {
                 for (let i = 0; i < fileList.length; i++) {
+                    const path = this.detectFileKind(fileList[i]);
                     this.files.push({
                         raw: fileList[i],
                         status: null, // null, 'processing', 'done', 'error'
                         progress: 0,
-                        statusMessage: this.getSupportErrorForPath(this.getConversionPath(fileList[i]))
+                        statusMessage: this.getSupportErrorForPath(path)
                     });
                 }
             },
@@ -440,6 +435,18 @@
 
             formatSize(bytes) {
                 return (bytes / 1024 / 1024).toFixed(2) + ' MB';
+            },
+
+            getTargetBytes() {
+                const numericMaxSize = Number(this.maxSize);
+
+                if (!Number.isFinite(numericMaxSize) || numericMaxSize <= 0) {
+                    throw new Error('Max size must be a positive number.');
+                }
+
+                return this.unit === 'MB'
+                    ? numericMaxSize * 1024 * 1024
+                    : numericMaxSize * 1024;
             },
 
             detectFileKind(file) {
@@ -463,11 +470,7 @@
                 return 'unsupported';
             },
 
-            getConversionPath(file) {
-                return this.detectFileKind(file);
-            },
-
-            assertConversionSupport(path, file) {
+            assertFileSupport(path, file) {
                 if (path !== 'unsupported') return;
 
                 const normalizedMime = (file?.type || '').toLowerCase() || 'empty';
@@ -479,58 +482,60 @@
                 throw new Error(`Format not supported (Only Video, Image, and GIF). Detected MIME: ${normalizedMime}, extension: ${extension}`);
             },
 
+            finalizeFile(fileObj, blob, newExt) {
+                this.downloadFile(blob, this.getOutName(fileObj.raw.name, newExt));
+                fileObj.status = 'done';
+                fileObj.progress = 100;
+                fileObj.statusMessage = `${this.formatSize(fileObj.raw.size)} -> ${this.formatSize(blob.size)}`;
+            },
+
             async startCompression() {
                 this.isCompressing = true;
 
-                const targetBytes = this.unit === 'MB'
-                    ? this.maxSize * 1024 * 1024
-                    : this.maxSize * 1024;
+                try {
+                    const targetBytes = this.getTargetBytes();
 
-                for (let fileObj of this.files) {
-                    if (fileObj.status === 'done') continue; // Skip already done
+                    for (let fileObj of this.files) {
+                        if (fileObj.status === 'done') continue; // Skip already done
 
-                    // Determine effective target size for metadata stripping
-                    // If file is smaller than target, we still re-encode (to strip metadata)
-                    // but we aim for the original file size so we don't bloat it unnecessarily.
-                    const effectiveTargetBytes = Math.min(fileObj.raw.size, targetBytes);
+                        // If the file is already under the limit, keep the original size as the cap
+                        // so we still sanitize metadata without accidentally growing it.
+                        const effectiveTargetBytes = Math.min(fileObj.raw.size, targetBytes);
 
-                    fileObj.status = 'processing';
-                    fileObj.progress = 0;
-                    fileObj.statusMessage = '';
+                        fileObj.status = 'processing';
+                        fileObj.progress = 0;
+                        fileObj.statusMessage = '';
 
-                    try {
-                        const path = this.getConversionPath(fileObj.raw);
-                        this.assertConversionSupport(path, fileObj.raw);
+                        try {
+                            const path = this.detectFileKind(fileObj.raw);
+                            this.assertFileSupport(path, fileObj.raw);
+                            this.assertBrowserSupport(path);
 
-                        if (path === 'video') {
-                            const blob = await this.compressVideoWorker(fileObj, effectiveTargetBytes);
-                            this.downloadFile(blob, this.getOutName(fileObj.raw.name, '.mp4'));
-                            fileObj.status = 'done';
-                        } else if (path === 'image') {
-                            // Fallback to main thread Image compression for now
-                            const blob = await this.compressImage(fileObj.raw, effectiveTargetBytes);
-                            this.downloadFile(blob, this.getOutName(fileObj.raw.name, '.webp'));
-                            fileObj.status = 'done';
-                        } else if (path === 'gif') {
-                            // GIF -> WebM via new Worker
-                            const blob = await this.compressGifWorker(fileObj, effectiveTargetBytes);
-                            this.downloadFile(blob, this.getOutName(fileObj.raw.name, '.webm'));
-                            fileObj.status = 'done';
+                            if (path === 'video') {
+                                const blob = await this.compressVideoWorker(fileObj, effectiveTargetBytes);
+                                this.finalizeFile(fileObj, blob, '.mp4');
+                            } else if (path === 'image') {
+                                const blob = await this.compressImage(fileObj.raw, effectiveTargetBytes);
+                                this.finalizeFile(fileObj, blob, '.webp');
+                            } else if (path === 'gif') {
+                                const blob = await this.compressGifWorker(fileObj, effectiveTargetBytes);
+                                this.finalizeFile(fileObj, blob, '.webm');
+                            }
+                        } catch (e) {
+                            console.error(e);
+                            fileObj.status = 'error';
+                            fileObj.statusMessage = e.message;
                         }
-                    } catch (e) {
-                        console.error(e);
-                        fileObj.status = 'error';
-                        fileObj.statusMessage = e.message;
                     }
+                } finally {
+                    this.isCompressing = false;
                 }
-
-                this.isCompressing = false;
             },
 
             compressVideoWorker(fileObj, targetBytes) {
                 return new Promise((resolve, reject) => {
                     try {
-                        this.assertConversionSupport('video');
+                        this.assertBrowserSupport('video');
                     } catch (e) {
                         reject(e);
                         return;
@@ -571,7 +576,7 @@
             compressGifWorker(fileObj, targetBytes) {
                 return new Promise((resolve, reject) => {
                     try {
-                        this.assertConversionSupport('gif');
+                        this.assertBrowserSupport('gif');
                     } catch (e) {
                         reject(e);
                         return;
@@ -608,7 +613,7 @@
             },
 
             async compressImage(file, targetBytes) {
-                this.assertConversionSupport('image');
+                this.assertBrowserSupport('image');
 
                 // Ported from legacy code
                 const img = new Image();
@@ -631,6 +636,9 @@
 
                     const canvas = document.createElement('canvas');
                     const ctx = canvas.getContext('2d');
+                    if (!ctx) {
+                        throw new Error(`Could not create 2D canvas context for "${file.name}".`);
+                    }
 
                     let width = img.width;
                     let height = img.height;
@@ -673,8 +681,8 @@
 
                     if (blob.size > targetBytes && quality <= 0.1) {
                         const scaleFactor = Math.sqrt(targetBytes / blob.size) * 0.9;
-                        width = Math.floor(width * scaleFactor);
-                        height = Math.floor(height * scaleFactor);
+                        width = Math.max(1, Math.floor(width * scaleFactor));
+                        height = Math.max(1, Math.floor(height * scaleFactor));
                         blob = await getBlob(0.8, width, height);
 
                         if (!blob) {
@@ -701,8 +709,10 @@
             },
 
             getOutName(originalName, newExt) {
-                const namePart = originalName.replace(/(\.[\w\d]+)$/, '');
-                const ext = newExt || originalName.match(/(\.[\w\d]+)$/)[0];
+                const extensionIndex = originalName.lastIndexOf('.');
+                const hasExtension = extensionIndex > 0;
+                const namePart = hasExtension ? originalName.slice(0, extensionIndex) : originalName;
+                const ext = newExt || (hasExtension ? originalName.slice(extensionIndex) : '');
                 return `${namePart}_c${ext}`;
             }
         }));

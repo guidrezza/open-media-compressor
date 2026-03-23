@@ -1,18 +1,24 @@
 import MP4Box from 'mp4box';
 import * as Mp4Muxer from 'mp4-muxer';
+import { sanitizeMp4Blob } from './media_sanitizers.js';
+import {
+    buildVideoEncodePlan,
+    chooseScaledDimensions,
+    getRetryBitrate
+} from './video_utils.js';
 
 self.onmessage = async (e) => {
-    const { file, targetSizeBytes, config } = e.data;
+    const { file, targetSizeBytes } = e.data;
 
     try {
-        await compress(file, targetSizeBytes, config);
+        await compress(file, targetSizeBytes);
     } catch (err) {
         console.error('Worker error:', err);
         self.postMessage({ type: 'error', message: err.message });
     }
 };
 
-async function compress(file, targetSizeBytes, config) {
+async function compress(file, targetSizeBytes) {
     // 1. Read file
     const arrayBuffer = await file.arrayBuffer();
     arrayBuffer.fileStart = 0; // MP4Box requirement
@@ -150,28 +156,62 @@ async function compress(file, targetSizeBytes, config) {
         throw new Error('Could not calculate valid duration from file metadata');
     }
 
-    // 4. Calculate Bitrate
-    // Target Size (bits) * 0.98 (2% overhead safety for container + fluctuation) / Duration (sec)
-    const safetyFactor = 0.98;
-    let targetBitrate = Math.floor((targetSizeBytes * 8 * safetyFactor) / durationSec);
-
-    // Clamp min bitrate but warn
-    const MIN_BITRATE = 50000; // 50 kbps
-    let wasClamped = false;
-    if (targetBitrate < MIN_BITRATE) {
-        targetBitrate = MIN_BITRATE;
-        wasClamped = true;
-    }
+    // 4. Calculate bitrate + overhead budget from actual timing
+    const encodePlan = buildVideoEncodePlan({
+        track: videoTrack,
+        samples,
+        durationSec,
+        targetSizeBytes
+    });
+    let targetBitrate = encodePlan.targetBitrate;
 
     self.postMessage({
         type: 'status',
-        message: `Video: ${durationSec.toFixed(1)}s. Target: ${(targetSizeBytes / 1024 / 1024).toFixed(1)}MB. Bitrate: ${Math.round(targetBitrate / 1000)}k${wasClamped ? ' (min-clamped)' : ''}`
+        message: `Video: ${durationSec.toFixed(1)}s at ${encodePlan.frameRate.toFixed(2)}fps. Target: ${(targetSizeBytes / 1024 / 1024).toFixed(1)}MB. Reserved overhead: ${(encodePlan.overheadBytes / 1024).toFixed(0)}KB. Bitrate: ${Math.round(targetBitrate / 1000)}k${encodePlan.wasClamped ? ' (min-clamped)' : ''}`
     });
 
-    await processVideo(mp4boxfile, videoTrack, targetBitrate, samples);
+    const maxAttempts = 2;
+    let finalBlob = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        if (attempt > 1) {
+            self.postMessage({
+                type: 'status',
+                message: `Retrying video encode at ${Math.round(targetBitrate / 1000)}kbps to land under target size...`
+            });
+        }
+
+        const encodedBlob = await processVideo(mp4boxfile, videoTrack, {
+            bitrate: targetBitrate,
+            frameRate: encodePlan.frameRate,
+            samples
+        });
+        const sanitizedBlob = await sanitizeMp4Blob(encodedBlob);
+
+        finalBlob = sanitizedBlob;
+
+        if (sanitizedBlob.size <= targetSizeBytes || attempt === maxAttempts) {
+            break;
+        }
+
+        const nextBitrate = getRetryBitrate({
+            currentBitrate: targetBitrate,
+            actualSizeBytes: sanitizedBlob.size,
+            targetSizeBytes
+        });
+
+        if (nextBitrate >= targetBitrate) {
+            break;
+        }
+
+        targetBitrate = nextBitrate;
+    }
+
+    self.postMessage({ type: 'progress', value: 100 });
+    self.postMessage({ type: 'done', blob: finalBlob });
 }
 
-async function processVideo(mp4boxfile, track, bitrate, samples) {
+async function processVideo(mp4boxfile, track, { bitrate, frameRate, samples }) {
     const totalSamples = samples.length;
     let encodedFrames = 0;
     let aborted = false;
@@ -207,48 +247,23 @@ async function processVideo(mp4boxfile, track, bitrate, samples) {
         rejectAbort(abortError);
     };
 
-    // Determine scale factor based on bitrate and resolution
-    // Standard bitrate guidelines: 1080p needs ~2-4Mbps, 720p ~1-2Mbps, 480p ~0.5-1Mbps
-    let scale = 1;
-    let targetWidth = track.video.width;
-    let targetHeight = track.video.height;
-
-    // Simple heuristic: if we are starved for bitrate, downscale
-    const pixelCount = targetWidth * targetHeight;
-    const bitsPerPixel = bitrate / (pixelCount * 30); // assuming 30fps
-
-    // If BPP is very low (< 0.05), quality will be trash, downscale.
-    // Or closer manual thresholds:
-    if (bitrate < 2000000 && targetHeight > 1080) { // < 2Mbps && > 1080p -> 1080p or 720p
-        scale = 1080 / targetHeight;
-    }
-    // Re-check after potential first downscale or if original was 1080p
-    // Note: using 'targetHeight * scale' for checks would be cleaner but let's iterate
-
-    // Easier logic: Target a resolution that fits the bitrate
-    if (bitrate < 1000000) { // < 1Mbps -> Target 480p
-        const desiredHeight = 480;
-        if (targetHeight > desiredHeight) {
-            scale = desiredHeight / targetHeight;
-        }
-    } else if (bitrate < 2500000) { // < 2.5Mbps -> Target 720p
-        const desiredHeight = 720;
-        if (targetHeight > desiredHeight) {
-            scale = desiredHeight / targetHeight;
-        }
-    }
-
-    // Ensure even dimensions
-    let finalWidth = Math.round(targetWidth * scale);
-    let finalHeight = Math.round(targetHeight * scale);
-    if (finalWidth % 2 !== 0) finalWidth--;
-    if (finalHeight % 2 !== 0) finalHeight--;
+    const {
+        scale,
+        finalWidth,
+        finalHeight,
+        bitsPerPixelPerFrame
+    } = chooseScaledDimensions({
+        width: track.video.width,
+        height: track.video.height,
+        bitrate,
+        frameRate
+    });
 
     // Log the decision
     if (scale < 1) {
         self.postMessage({
             type: 'status',
-            message: `Downscaling to ${finalWidth}x${finalHeight} to fit target size...`
+            message: `Downscaling to ${finalWidth}x${finalHeight} to fit target size (${bitsPerPixelPerFrame.toFixed(3)} bpp/f)...`
         });
     }
 
@@ -259,6 +274,9 @@ async function processVideo(mp4boxfile, track, bitrate, samples) {
         // OffscreenCanvas is available in Workers
         canvas = new OffscreenCanvas(finalWidth, finalHeight);
         ctx = canvas.getContext('2d');
+        if (!ctx) {
+            throw new Error('Could not create 2D context for video resize');
+        }
         // optimize for quality
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = 'high';
@@ -301,7 +319,7 @@ async function processVideo(mp4boxfile, track, bitrate, samples) {
         width: finalWidth,
         height: finalHeight,
         bitrate: bitrate,
-        framerate: 30,
+        framerate: frameRate,
         bitrateMode: 'constant' // Force CBR to strictly respect limit
     });
 
@@ -311,7 +329,7 @@ async function processVideo(mp4boxfile, track, bitrate, samples) {
         width: finalWidth,
         height: finalHeight,
         bitrate: bitrate,
-        framerate: 30,
+        framerate: frameRate,
     });
 
     // Try High 4.2 -> Main 4.2 -> Baseline 4.2 -> High 5.1
@@ -383,7 +401,7 @@ async function processVideo(mp4boxfile, track, bitrate, samples) {
     }
 
     // 8. Process Loop with backpressure management
-    self.postMessage({ type: 'status', message: `Encoding ${totalSamples} frames...` });
+    self.postMessage({ type: 'status', message: `Encoding ${totalSamples} frames at ${frameRate.toFixed(2)}fps...` });
     self.postMessage({ type: 'progress', value: 0 });
 
     const QUEUE_LIMIT = 10; // Max items in queue before waiting
@@ -425,15 +443,26 @@ async function processVideo(mp4boxfile, track, bitrate, samples) {
         await encoder.flush();
     })();
 
-    await Promise.race([processPipeline, abortPromise]);
+    try {
+        await Promise.race([processPipeline, abortPromise]);
+    } finally {
+        if (decoder && decoder.state !== 'closed') {
+            try {
+                decoder.close();
+            } catch (e) { }
+        }
+
+        if (encoder && encoder.state !== 'closed') {
+            try {
+                encoder.close();
+            } catch (e) { }
+        }
+    }
 
     muxer.finalize();
 
     const buffer = muxer.target.buffer;
-    const blob = new Blob([buffer], { type: 'video/mp4' });
-
-    self.postMessage({ type: 'progress', value: 100 });
-    self.postMessage({ type: 'done', blob: blob });
+    return new Blob([buffer], { type: 'video/mp4' });
 }
 
 function getTrackDescription(mp4boxfile, track) {

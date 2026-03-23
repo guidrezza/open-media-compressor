@@ -22,6 +22,8 @@ test('required worker and utility modules exist', () => {
     const requiredFiles = [
         'src/compression.worker.js',
         'src/gif.worker.js',
+        'src/media_sanitizers.js',
+        'src/video_utils.js',
         'src/webp_utils.js',
     ];
 
