@@ -342,6 +342,10 @@
 
     <script type="module">
         import Alpine from 'alpinejs';
+        import {
+            detectFileKind,
+            getUnsupportedFileMessage
+        } from './src/file_types.js';
         import { stripWebPMetadata } from './src/webp_utils.js';
 
         window.Alpine = Alpine;
@@ -450,36 +454,13 @@
             },
 
             detectFileKind(file) {
-                const mime = (file?.type || '').toLowerCase();
-
-                if (mime.startsWith('video/')) return 'video';
-                if (mime === 'image/gif') return 'gif';
-                if (mime.startsWith('image/')) return 'image';
-
-                const fileName = (file?.name || '').toLowerCase();
-                const ext = fileName.includes('.') ? fileName.slice(fileName.lastIndexOf('.')) : '';
-
-                const videoExtensions = new Set(['.mp4', '.mov', '.m4v', '.webm', '.mkv', '.avi', '.wmv', '.flv']);
-                const gifExtensions = new Set(['.gif']);
-                const imageExtensions = new Set(['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tif', '.tiff', '.avif', '.heic', '.heif']);
-
-                if (videoExtensions.has(ext)) return 'video';
-                if (gifExtensions.has(ext)) return 'gif';
-                if (imageExtensions.has(ext)) return 'image';
-
-                return 'unsupported';
+                return detectFileKind(file);
             },
 
             assertFileSupport(path, file) {
                 if (path !== 'unsupported') return;
 
-                const normalizedMime = (file?.type || '').toLowerCase() || 'empty';
-                const loweredName = (file?.name || '').toLowerCase();
-                const extension = loweredName.includes('.')
-                    ? loweredName.slice(loweredName.lastIndexOf('.'))
-                    : 'none';
-
-                throw new Error(`Format not supported (Only Video, Image, and GIF). Detected MIME: ${normalizedMime}, extension: ${extension}`);
+                throw new Error(getUnsupportedFileMessage(file));
             },
 
             finalizeFile(fileObj, blob, newExt) {
